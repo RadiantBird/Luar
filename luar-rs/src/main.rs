@@ -5,7 +5,9 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
-const HELP: &str = "luar - Luar to Luau transpiler v0.1.0
+const VERSION: &str = concat!("luar ", env!("CARGO_PKG_VERSION"));
+
+const HELP: &str = "luar - Luar to Luau transpiler
 
 Usage:
   luar compile <input.luar> [output.luau]   Compile Luar source to Luau
@@ -36,6 +38,11 @@ fn run() -> Result<(), ()> {
         || command == OsStr::new("-h")
     {
         println!("{HELP}");
+        return Ok(());
+    }
+
+    if command == OsStr::new("version") || command == OsStr::new("--version") || command == OsStr::new("-V") {
+        println!("{VERSION}");
         return Ok(());
     }
 

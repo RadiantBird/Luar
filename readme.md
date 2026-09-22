@@ -1,5 +1,21 @@
 # Luar Programming Language
 
+## コンパイラの更新（Windows）
+開発中にコンパイラを更新するときは、リポジトリ直下から次を実行する。
+
+```powershell
+.\tools\Update-Luar.ps1
+```
+
+このスクリプトはRelease版をビルドし、`%USERPROFILE%\.cargo\bin\luar.exe`（`CARGO_HOME`を設定している場合は`%CARGO_HOME%\bin\luar.exe`）へ置き換える。更新結果は次で確認できる。
+
+```powershell
+luar --version
+Get-Command luar -All
+```
+
+`luar-rs\target\release`はビルド成果物であり、PATHへ登録しない。PATHにはCargoの`bin`ディレクトリだけを登録して、常に更新スクリプトが置き換える実行ファイルを使用する。
+
 ## 概要
 Luau言語から派生し、ついにオブジェクト指向・テーブルのディープコピーを実現。
 
