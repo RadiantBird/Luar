@@ -88,6 +88,21 @@ export class Parser {
 
   private parseLocal(): Stmt {
     this.eat("local");
+
+    // Lua-compatible named local function declaration:
+    //   local function name(...) ... end
+    if (this.match("function")) {
+      const name = this.eatIdent();
+      const { params, returnType } = this.parseFuncSignature();
+      const body = this.parseFuncBody();
+      return {
+        kind: "Local",
+        names: [name],
+        types: [null],
+        values: [{ kind: "Function", params, returnType, body }],
+      };
+    }
+
     const names: string[] = [];
     const types: (TypeExpr | null)[] = [];
     names.push(this.eatIdent());

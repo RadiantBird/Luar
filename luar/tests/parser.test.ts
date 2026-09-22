@@ -130,6 +130,15 @@ describe("Parser: 通常文", () => {
     expect(prog.stmts[0]).toMatchObject({ kind: "Local", names: ["x"] });
   });
 
+  it("Lua互換のlocal function宣言", () => {
+    const prog = parse("local function greet(name) return name end");
+    expect(prog.stmts[0]).toMatchObject({
+      kind: "Local",
+      names: ["greet"],
+      values: [{ kind: "Function" }],
+    });
+  });
+
   it("代入文", () => {
     const prog = parse("x = 10");
     expect(prog.stmts[0]).toMatchObject({ kind: "Assign" });

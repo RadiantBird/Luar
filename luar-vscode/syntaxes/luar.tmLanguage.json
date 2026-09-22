@@ -55,9 +55,9 @@
     },
     "const-decl": {
       "comment": "contextual const declaration",
-      "match": "\\b(const)\\b(?=[ \\t]+(?:function\\b|[A-Za-z_][A-Za-z0-9_]*))",
+      "match": "(^[ \\t]*|[;\\n][ \\t]*)(const)\\b",
       "captures": {
-        "1": { "name": "storage.modifier.const.luar" }
+        "2": { "name": "storage.modifier.const.luar" }
       }
     },
     "import-decl": {
