@@ -292,6 +292,21 @@ print(t2) --[[
 ## モジュール(import type)
 `import type`はコンパイル時の名前解決だけを行う型専用宣言であり、実行時にmoduleを読み込む機能ではない。旧 `import module` 構文は使用できない。
 
+### 実体の束縛
+`import type mod`は、実行時の変数`mod`を作らない。これは`.luard`の宣言を参照し、未修飾のメンバー名を`mod.member`へ解決するためだけの名前である。
+
+実行時のモジュールテーブルは、対象ランタイムに合わせて同名の`local`または`const`で束縛する。これは意図的なシャドーイングであり、コンパイルエラーにはならない。
+
+```luau
+import type mod
+const mod = require("@./mod.luar")
+
+mod.run()
+print(hogehoge) -- mod.hogehogeへ変換
+```
+
+`require`、C/C++バインド、グローバルテーブルなど、実体をどのように提供するかはLuarではなく実行環境が決める。`import type`自体は実行時コードを生成しない。
+
 ### 定義ファイル
 `import type qaz`と書いた`.luar`ファイルと同じディレクトリに、`qaz.luard`を配置する。
 
@@ -342,9 +357,7 @@ declare bar: number
 - 同じ名前が複数moduleに存在しても、その未修飾名が実際に使われなければエラーにしない。
   実際に使われた場合だけ曖昧な参照としてコンパイルエラーにする。
 - `hoge.bar`のような修飾済み参照は曖昧性の影響を受けない。
-- moduleは実行時にテーブルとして提供されている必要がある。`import type mod`と`local mod = require(...)`の同名共存は正規の使い方である。
-- 実際の読み込みはC/C++バインドや`require`など、利用するLuau環境が行う。`import type`はロード処理を生成しない。
-  Luarコンパイラはmoduleのロード処理を生成しない。
+- moduleは実行時にテーブルとして提供されている必要がある。実体の束縛については「実体の束縛」を参照する。
 - 定義ファイルの欠落、不正な記述、同一ファイル内の重複宣言、同じmoduleの重複importは
   ファイル名と行番号を含むコンパイルエラーになる。
 
