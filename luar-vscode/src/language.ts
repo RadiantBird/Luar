@@ -63,6 +63,17 @@ export interface ModuleDefinitionResult {
   errors: ModuleDefinitionError[];
 }
 
+/**
+ * Replaces a valid declaration-form include macro with an empty table for
+ * editor-only parsing. The compiler performs the real file expansion.
+ */
+export function normalizeIncludeMacros(source: string): string {
+  return source.replace(
+    /^(\s*)(local|const)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*!include\s*\(\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')\s*\)(\s*(?:--.*)?)$/gm,
+    "$1$2 $3 = {}$4",
+  );
+}
+
 /** Parse the deliberately small .luard grammar used by the Rust compiler. */
 export function parseModuleDefinition(moduleName: string, source: string, filePath = `${moduleName}.luard`): ModuleDefinitionResult {
   const errors: ModuleDefinitionError[] = [];

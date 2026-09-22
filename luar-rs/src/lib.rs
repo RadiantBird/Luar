@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod checker;
 pub mod codegen;
+pub mod include;
 pub mod lexer;
 pub mod modules;
 pub mod parser;
@@ -94,7 +95,8 @@ pub extern "C" fn luar_compile_with_path(
 }
 
 pub fn compile_source(source: &str, source_path: Option<&Path>) -> Result<String, Vec<String>> {
-    let mut parser = parser::Parser::new(source).map_err(|error| vec![error.0])?;
+    let source = include::expand_source(source, source_path).map_err(|error| vec![error])?;
+    let mut parser = parser::Parser::new(&source).map_err(|error| vec![error.0])?;
     let mut program = parser.parse().map_err(|error| vec![error.0])?;
 
     let mut imports = Vec::new();

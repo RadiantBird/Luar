@@ -26,6 +26,7 @@ import {
   importsInDocument,
   indexDocument,
   loadModuleDefinition,
+  normalizeIncludeMacros,
   type DocumentIndex,
   type LanguageSymbol,
 } from "./language";
@@ -108,13 +109,13 @@ connection.onDocumentSymbol((params): DocumentSymbol[] => {
 
 function updateIndex(document: TextDocument): void {
   const modules = resolveModules(document);
-  indexes.set(document.uri, indexDocument(document.getText(), modules.definitions));
+  indexes.set(document.uri, indexDocument(normalizeIncludeMacros(document.getText()), modules.definitions));
   moduleDiagnostics.set(document.uri, modules.diagnostics);
 }
 function getIndex(document: TextDocument): DocumentIndex {
   const current = indexes.get(document.uri);
   if (current) return current;
-  const created = indexDocument(document.getText());
+  const created = indexDocument(normalizeIncludeMacros(document.getText()));
   indexes.set(document.uri, created);
   return created;
 }
@@ -185,7 +186,7 @@ function wordAt(document: TextDocument, position: Position): string | null {
 }
 
 function validate(document: TextDocument): void {
-  const src = document.getText();
+  const src = normalizeIncludeMacros(document.getText());
   const diagnostics: Diagnostic[] = [];
 
   // .luard files are definition files, not compilable .luar programs.

@@ -8,6 +8,7 @@
     { "include": "#template-string" },
     { "include": "#string" },
     { "include": "#number" },
+    { "include": "#include-macro" },
     { "include": "#const-decl" },
     { "include": "#import-decl" },
     { "include": "#declare-decl" },
@@ -58,6 +59,16 @@
       "match": "(^[ \\t]*|[;\\n][ \\t]*)(const)\\b",
       "captures": {
         "2": { "name": "storage.modifier.const.luar" }
+      }
+    },
+    "include-macro": {
+      "comment": "source include declaration macro",
+      "match": "(!include)\\s*(\\()\\s*(\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*')\\s*(\\))",
+      "captures": {
+        "1": { "name": "keyword.control.include.luar" },
+        "2": { "name": "punctuation.section.parens.begin.luar" },
+        "3": { "name": "string.quoted.other.luar" },
+        "4": { "name": "punctuation.section.parens.end.luar" }
       }
     },
     "import-decl": {

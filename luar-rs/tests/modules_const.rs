@@ -32,6 +32,12 @@ impl TempProject {
     fn definition_bytes(&self, module: &str, source: &[u8]) {
         fs::write(self.path.join(format!("{module}.luard")), source).unwrap();
     }
+
+    fn source(&self, name: &str, source: &str) -> PathBuf {
+        let path = self.path.join(name);
+        fs::write(&path, source).unwrap();
+        path
+    }
 }
 
 impl Drop for TempProject {
@@ -421,4 +427,85 @@ fn const_binding_shadows_a_module_member_before_rewrite() {
     .unwrap();
     assert!(output.contains("print(value)"));
     assert!(!output.contains("module.value"));
+}
+
+#[test]
+fn include_inlines_the_returned_module_body() {
+    let project = TempProject::new();
+    project.definition("mod", "declare hogehoge: string\ndeclare run: () -> ()\n");
+    project.source(
+        "mod.luar",
+        r#"local mod = {}
+mod.hogehoge = "gepyaaa"
+
+function mod.run()
+    print("this is mod, not admin!")
+end
+
+return mod
+"#,
+    );
+
+    let output = compile_at(
+        r#"import type mod
+local mod = !include("@./mod.luar")
+mod.run()
+print(mod.hogehoge)"#,
+        &project.source_path(),
+    )
+    .unwrap();
+
+    assert!(!output.contains("!include"));
+    assert!(!output.contains("return mod"));
+    assert!(!output.contains("import type"));
+    assert!(output.contains("local mod = {}"));
+    assert!(output.contains("function mod.run()"));
+    assert!(output.contains("mod.run()\nprint(mod.hogehoge)"));
+}
+
+#[test]
+fn include_creates_an_alias_when_the_returned_name_differs() {
+    let project = TempProject::new();
+    project.source("implementation.luar", "local implementation = {}\nreturn implementation\n");
+
+    let output = compile_at(
+        "const api = !include(\"./implementation.luar\")",
+        &project.source_path(),
+    )
+    .unwrap();
+
+    assert!(output.contains("local implementation = {}"));
+    assert!(output.contains("const api = implementation"));
+}
+
+#[test]
+fn include_reports_missing_extension_cycle_and_terminal_return_errors() {
+    let project = TempProject::new();
+    let main = project.source("main.luar", "local mod = !include(\"./missing.luar\")");
+    let missing = compile_at("local mod = !include(\"./missing.luar\")", &main).unwrap_err();
+    assert_error(&missing, "main.luar:1");
+    assert_error(&missing, "cannot read included source");
+
+    let extension = compile_at("local mod = !include(\"./mod.lua\")", &main).unwrap_err();
+    assert_error(&extension, "main.luar:1");
+    assert_error(&extension, "only accepts .luar");
+
+    let quoted = compile_at("local mod = !include('./mod.lua')", &main).unwrap_err();
+    assert_error(&quoted, "only accepts .luar");
+
+    project.source("without_return.luar", "local mod = {}\n");
+    let no_return = compile_at("local mod = !include(\"./without_return.luar\")", &main).unwrap_err();
+    assert_error(&no_return, "without_return.luar:1");
+    assert_error(&no_return, "must end with standalone");
+
+    project.source("first.luar", "local first = !include(\"./second.luar\")\nreturn first\n");
+    project.source("second.luar", "local second = !include(\"./first.luar\")\nreturn second\n");
+    let cycle = compile_at("local first = !include(\"./first.luar\")", &main).unwrap_err();
+    assert_error(&cycle, "!include cycle detected");
+}
+
+#[test]
+fn include_requires_a_source_path() {
+    let errors = compile_source("local mod = !include(\"./mod.luar\")", None).unwrap_err();
+    assert_error(&errors, "require compile_source with a source file path");
 }

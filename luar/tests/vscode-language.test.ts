@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { indexDocument, parseModuleDefinition } from "../../luar-vscode/src/language";
+import { indexDocument, normalizeIncludeMacros, parseModuleDefinition } from "../../luar-vscode/src/language";
 
 describe("VS Code module definitions", () => {
+  it("normalizes declaration-form include macros for editor parsing", () => {
+    expect(normalizeIncludeMacros('local mod = !include("@./mod.luar") -- module source')).toBe("local mod = {} -- module source");
+    expect(normalizeIncludeMacros("const mod = !include('./mod.luar')")).toBe("const mod = {}");
+  });
+
   it("parses declarations and preserves type text and positions", () => {
     const result = parseModuleDefinition("qaz", "-- comment\ndeclare wsx: (string, number)?\ndeclare run: () -> ()\ndeclare transform: (string?, number) -> (string, number)\ndeclare global workspace: workspace\n", "qaz.luard");
 

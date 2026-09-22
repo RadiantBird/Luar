@@ -323,6 +323,47 @@ print(hogehoge) -- mod.hogehogeへ変換
 
 `require`、C/C++バインド、グローバルテーブルなど、実体をどのように提供するかはLuarではなく実行環境が決める。`import type`自体は実行時コードを生成しない。
 
+### ソースのインライン展開
+実行環境の`require`が`.luar`を読めない場合は、宣言形式の`!include`マクロを使用できる。
+
+```luau
+import type mod
+local mod = !include("@./mod.luar")
+
+mod.run()
+print(hogehoge)
+```
+
+`!include`は、相対パスの`.luar`をコンパイル前にインライン展開する。取り込むファイルは最後にテーブル変数を返す必要がある。
+
+```luau
+-- mod.luar
+local mod = {}
+mod.hogehoge = "gepyaaa"
+
+function mod.run()
+    print("this is mod, not admin!")
+end
+
+return mod
+```
+
+上の例は次のLuarソースへ展開される。末尾の`return mod`は除去され、代入先と戻り値名が異なる場合だけ別名を束縛する。
+
+```luau
+local mod = {}
+mod.hogehoge = "gepyaaa"
+
+function mod.run()
+    print("this is mod, not admin!")
+end
+
+mod.run()
+print(mod.hogehoge)
+```
+
+`!include`は`local`または`const`の単一行宣言でのみ使用できる。パスはinclude元からの相対`.luar`パスであり、循環include、ファイル欠落、末尾の`return <identifier>`不在はコンパイルエラーになる。
+
 ### 定義ファイル
 `import type qaz`と書いた`.luar`ファイルと同じディレクトリに、`qaz.luard`を配置する。
 
