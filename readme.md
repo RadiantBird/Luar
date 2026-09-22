@@ -18,6 +18,14 @@ Get-Command luar -All
 
 VS Code拡張はPATH上の`luar`へ未保存の本文を渡し、Rustコンパイラと同じ診断を表示する。別の実行ファイルを使う場合は`luar.compiler.path`、互換性検査の対象は`luar.target`（`luau`または`lua54`）で設定する。コンパイラが見つからない場合もハイライトと補完は利用できるが、意味診断は無効になる。
 
+拡張機能をVSIXから利用している場合、ソース変更後はビルドだけでなくVSIXの再生成と再インストールが必要になる。
+
+```powershell
+cd .\luar-vscode
+npm run package
+code --install-extension .\luar-language-0.1.0.vsix --force
+```
+
 ## lintと外部runtime
 
 構文エラーと未定義globalの診断は、原因となるtoken全体を赤線または黄線で示す。未定義globalはLuaのruntime依存値を扱えるようwarningであり、`luar check`の終了コードを失敗にしない。Lua/Luau標準globalはあらかじめ認識する。

@@ -64,6 +64,7 @@
   },
   "scripts": {
     "build": "node build.js",
+    "package": "npx --yes @vscode/vsce package --no-dependencies",
     "watch": "node build.js --watch",
     "vscode:prepublish": "npm run build"
   },
