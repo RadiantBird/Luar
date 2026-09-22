@@ -13,6 +13,13 @@ function classDecl(src: string): ClassDecl {
   return decl;
 }
 
+describe("Parser: 型専用import", () => {
+  it("requires the type modifier", () => {
+    expect(() => parse("import module")).toThrow("import type <module>");
+    expect(parse("import type module").stmts[0]).toMatchObject({ kind: "ImportDecl", moduleName: "module" });
+  });
+});
+
 describe("Parser: クラス宣言", () => {
   it("基本的なクラス宣言", () => {
     const c = classDecl("class Foo is\nend");

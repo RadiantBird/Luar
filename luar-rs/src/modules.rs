@@ -63,7 +63,7 @@ pub fn parse_definition(
         let is_global = parser.take(TokenKind::Global);
         let (name, line) = parser.expect_ident()?;
         parser.expect(TokenKind::Colon, "':'")?;
-        parser.parse_type()?;
+        parser.parse_definition_type()?;
         if !all_names.insert(name.clone()) {
             return Err(parser.error(line, format!("name '{name}' is declared more than once")));
         }
@@ -129,19 +129,39 @@ impl DefinitionParser<'_> {
         }
     }
 
-    fn parse_type(&mut self) -> Result<(), ModuleError> {
+    /// Parses the type grammar accepted by `.luard` files.  This intentionally
+    /// remains separate from Luar's general `TypeExpr`: function types are a
+    /// declaration-file feature for now.
+    fn parse_definition_type(&mut self) -> Result<(), ModuleError> {
         if self.take(TokenKind::LParen) {
-            if !self.at(TokenKind::RParen) {
-                self.parse_type()?;
-                while self.take(TokenKind::Comma) {
-                    self.parse_type()?;
-                }
-            }
+            self.parse_definition_type_list()?;
             self.expect(TokenKind::RParen, "')'")?;
+            if self.take(TokenKind::Arrow) {
+                self.parse_definition_type()?;
+            }
         } else {
             self.expect_ident()?;
         }
         self.take(TokenKind::Question);
+        if self.at(TokenKind::Arrow) {
+            return Err(self.error(
+                self.token().line,
+                "function type parameters must be enclosed in parentheses; use `(T) -> U`"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn parse_definition_type_list(&mut self) -> Result<(), ModuleError> {
+        if self.at(TokenKind::RParen) {
+            return Ok(());
+        }
+
+        self.parse_definition_type()?;
+        while self.take(TokenKind::Comma) {
+            self.parse_definition_type()?;
+        }
         Ok(())
     }
 

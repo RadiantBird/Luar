@@ -155,9 +155,10 @@ export function importsInDocument(source: string): Array<{ name: string; line: n
     return [];
   }
   const imports: Array<{ name: string; line: number; col: number }> = [];
-  for (let i = 0; i + 1 < tokens.length; i++) {
-    if (tokens[i]!.kind === "import" && tokens[i + 1]!.kind === "Ident") {
-      const token = tokens[i + 1]!;
+  for (let i = 0; i + 2 < tokens.length; i++) {
+    if (tokens[i]!.kind === "import" && tokens[i + 1]!.kind === "Ident" &&
+        tokens[i + 1]!.value === "type" && tokens[i + 2]!.kind === "Ident") {
+      const token = tokens[i + 2]!;
       imports.push({ name: token.value, line: token.line - 1, col: token.col - 1 });
     }
   }
@@ -221,7 +222,7 @@ export function indexDocument(source: string, moduleDefinitions: ModuleDefinitio
 
     if (stmt.kind === "ImportDecl") {
       const pos = findToken(tokens, stmt.moduleName, searchFrom);
-      if (pos >= 0) addSymbol(index, makeSymbol(stmt.moduleName, "module", `import ${stmt.moduleName}`, tokens[pos], tokens[pos]));
+      if (pos >= 0) addSymbol(index, makeSymbol(stmt.moduleName, "module", `import type ${stmt.moduleName}`, tokens[pos], tokens[pos]));
       searchFrom = Math.max(pos + 1, searchFrom);
     } else if (stmt.kind === "DeclareStmt") {
       const pos = findToken(tokens, stmt.name, searchFrom);
@@ -277,6 +278,11 @@ function parseDefinitionType(tokens: Token[], start: number): number {
     }
     if (tokens[pos]?.kind !== ")") return -1;
     pos++;
+    if (tokens[pos]?.kind === "->") {
+      const result = parseDefinitionType(tokens, pos + 1);
+      if (result < 0) return -1;
+      return result;
+    }
   } else if (tokens[pos]?.kind === "Ident") {
     pos++;
   } else {
@@ -370,8 +376,10 @@ function indexTokens(index: DocumentIndex, tokens: Token[]): DocumentIndex {
       continue;
     }
 
-    if (token.kind === "import" && next.kind === "Ident") {
-      addSymbol(index, makeSymbol(next.value, "module", `import ${next.value}`, next, next));
+    if (token.kind === "import" && next.kind === "Ident" && next.value === "type" && tokens[i + 2]?.kind === "Ident") {
+      const module = tokens[i + 2]!;
+      addSymbol(index, makeSymbol(module.value, "module", `import type ${module.value}`, module, module));
+      i += 2;
     }
     if (token.kind === "declare" && next.kind === "Ident") {
       addSymbol(index, makeSymbol(next.value, "variable", `declare ${next.value}`, next, next));

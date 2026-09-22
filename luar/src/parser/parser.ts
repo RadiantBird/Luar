@@ -524,6 +524,11 @@ export class Parser {
 
   private parseImport(): ImportDecl {
     this.eat("import");
+    if (!this.check("Ident") || this.peek().value !== "type") {
+      const token = this.peek();
+      throw new ParseError("expected 'type' after 'import'; use 'import type <module>'", token.line, token.col);
+    }
+    this.advance();
     const moduleName = this.eatIdent();
     return { kind: "ImportDecl", moduleName };
   }

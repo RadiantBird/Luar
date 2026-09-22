@@ -57,6 +57,9 @@ connection.onCompletion((params: CompletionParams): CompletionItem[] => {
   if (!document) return [];
   const index = getIndex(document);
   const before = document.getText({ start: { line: params.position.line, character: 0 }, end: params.position });
+  if (/\bimport\s+[A-Za-z_0-9]*$/.test(before)) {
+    return [{ label: "type", kind: CompletionItemKind.Keyword, detail: "type-only module import" }];
+  }
   const memberMatch = before.match(/([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)?$/);
   if (memberMatch) {
     const memberPrefix = memberMatch[2] ?? "";

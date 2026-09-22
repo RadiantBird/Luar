@@ -59,13 +59,13 @@ fn adjacent_definition_rewrites_unqualified_reads_writes_and_calls() {
         r#"
 -- declarations can contain comments and blank lines
 declare answer: number
-declare calculate: (number, number)
+declare calculate: (number, number) -> number
 "#,
     );
 
     let output = compile_at(
         r#"
-import numbers
+import type numbers
 print(answer)
 answer = calculate(answer, 1)
 local record = { answer = answer, [answer] = calculate }
@@ -87,14 +87,14 @@ fn ambiguity_is_reported_only_when_unqualified_name_is_used() {
     project.definition("second", "declare shared: number");
 
     let unused = compile_at(
-        "import first\nimport second\nprint(first.shared, second.shared)",
+        "import type first\nimport type second\nprint(first.shared, second.shared)",
         &project.source_path(),
     )
     .unwrap();
     assert!(unused.contains("print(first.shared, second.shared)"));
 
     let errors = compile_at(
-        "import first\nimport second\nprint(shared)",
+        "import type first\nimport type second\nprint(shared)",
         &project.source_path(),
     )
     .unwrap_err();
@@ -111,7 +111,7 @@ fn globals_unknown_names_and_qualified_names_remain_unqualified() {
     );
 
     let output = compile_at(
-        "import engine\nprint(engine.value, workspace, unknownGlobal)",
+        "import type engine\nprint(engine.value, workspace, unknownGlobal)",
         &project.source_path(),
     )
     .unwrap();
@@ -126,7 +126,7 @@ fn lexical_bindings_shadow_module_members() {
 
     let output = compile_at(
         r#"
-import module
+import type module
 local value = 1
 do
     const value = 2
@@ -156,7 +156,7 @@ fn class_and_function_names_shadow_module_members() {
 
     let output = compile_at(
         r#"
-import module
+import type module
 class Worker is
     function recurse()
         recurse()
@@ -178,42 +178,87 @@ end
 fn definition_and_import_failures_include_actionable_diagnostics() {
     let project = TempProject::new();
 
-    let missing = compile_at("import missing\nprint(value)", &project.source_path()).unwrap_err();
+    let missing = compile_at("import type missing\nprint(value)", &project.source_path()).unwrap_err();
     assert_error(&missing, "cannot read module definition");
     assert_error(&missing, "missing.luard");
 
     project.definition("bad", "declare okay: number\nthis is not valid");
-    let invalid = compile_at("import bad", &project.source_path()).unwrap_err();
+    let invalid = compile_at("import type bad", &project.source_path()).unwrap_err();
     assert_error(&invalid, "bad.luard:2");
     assert_error(&invalid, "expected 'declare'");
 
     project.definition("duplicate", "declare value: number\ndeclare value: string");
-    let duplicate = compile_at("import duplicate", &project.source_path()).unwrap_err();
+    let duplicate = compile_at("import type duplicate", &project.source_path()).unwrap_err();
     assert_error(&duplicate, "duplicate.luard:2");
     assert_error(&duplicate, "declared more than once");
 
     project.definition_bytes("utf8", &[0xff, 0xfe]);
-    let utf8 = compile_at("import utf8", &project.source_path()).unwrap_err();
+    let utf8 = compile_at("import type utf8", &project.source_path()).unwrap_err();
     assert_error(&utf8, "not valid UTF-8");
 }
 
 #[test]
-fn duplicate_imports_old_api_and_source_declare_are_rejected() {
+fn definition_function_types_accept_optional_names_and_tuple_returns() {
+    let project = TempProject::new();
+    project.definition(
+        "mod",
+        r#"
+declare run: () -> ()
+declare transform: (string?, number) -> boolean?
+declare split: () -> (string, number)
+"#,
+    );
+
+    let output = compile_at(
+        r#"
+import type mod
+const mod = require("@./mod.luar")
+mod.run()
+"#,
+        &project.source_path(),
+    )
+    .unwrap();
+
+    assert!(output.contains("const mod = require(\"@./mod.luar\")"));
+    assert!(output.contains("mod.run()"));
+    assert!(!output.contains("import type"));
+}
+
+#[test]
+fn malformed_definition_function_types_include_path_and_line() {
+    let project = TempProject::new();
+    project.definition("bad_arrow", "declare run: string -> ()");
+    let invalid_arrow = compile_at("import type bad_arrow", &project.source_path()).unwrap_err();
+    assert_error(&invalid_arrow, "bad_arrow.luard:1");
+    assert_error(&invalid_arrow, "function type parameters must be enclosed in parentheses");
+
+    project.definition("missing_return", "declare run: () ->");
+    let missing_return = compile_at("import type missing_return", &project.source_path()).unwrap_err();
+    assert_error(&missing_return, "missing_return.luard:1");
+    assert_error(&missing_return, "expected identifier");
+}
+
+#[test]
+fn duplicate_type_imports_legacy_import_and_source_declare_are_rejected() {
     let project = TempProject::new();
     project.definition("module", "declare value: number");
 
     let duplicate = compile_at(
-        "import module\nimport module\nprint(value)",
+        "import type module\nimport type module\nprint(value)",
         &project.source_path(),
     )
     .unwrap_err();
     assert_error(&duplicate, "imported more than once");
 
-    let no_path = compile_source("import module\nprint(value)", None).unwrap_err();
+    let legacy = compile_at("import module", &project.source_path()).unwrap_err();
+    assert_error(&legacy, "expected 'type' after 'import'");
+    assert_error(&legacy, "import type <module>");
+
+    let no_path = compile_source("import type module\nprint(value)", None).unwrap_err();
     assert_error(&no_path, "require luar_compile_with_path");
 
     let empty_path =
-        compile_source("import module\nprint(value)", Some(Path::new(""))).unwrap_err();
+        compile_source("import type module\nprint(value)", Some(Path::new(""))).unwrap_err();
     assert_error(&empty_path, "require a non-empty source file path");
 
     let source_declare = compile_source("declare value: number\nprint(value)", None).unwrap_err();
@@ -345,7 +390,7 @@ fn const_binding_shadows_a_module_member_before_rewrite() {
     project.definition("module", "declare value: number");
 
     let output = compile_at(
-        "import module\nconst value = 10\nprint(value)",
+        "import type module\nconst value = 10\nprint(value)",
         &project.source_path(),
     )
     .unwrap();

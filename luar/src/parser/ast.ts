@@ -50,7 +50,7 @@ export type Stmt =
   | ImportDecl
   | DeclareStmt;
 
-// import <moduleName>
+// import type <moduleName>
 export type ImportDecl = {
   kind: "ImportDecl";
   moduleName: string;

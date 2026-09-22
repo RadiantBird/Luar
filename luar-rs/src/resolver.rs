@@ -44,9 +44,6 @@ impl Resolver {
     }
 
     pub fn resolve(mut self, program: &mut Program) -> Vec<ResolveError> {
-        for module in &self.imported_modules {
-            self.scopes[0].insert(module.clone(), false);
-        }
         for stmt in &program.stmts {
             if let Stmt::ClassDecl(decl) = stmt {
                 self.scopes[0].insert(decl.name.clone(), false);
@@ -210,7 +207,14 @@ impl Resolver {
     fn visit_expr(&mut self, expr: &mut Expr) {
         match expr {
             Expr::Ident(name) => {
-                if self.lookup(name).is_some() || self.module_globals.contains(name) {
+                // A type import identifies an externally supplied module table,
+                // but never creates a lexical binding. This keeps qualified
+                // access intact while allowing `local` or `const` bindings such
+                // as `const mod = require(...)` to use the same name.
+                if self.lookup(name).is_some()
+                    || self.imported_modules.contains(name)
+                    || self.module_globals.contains(name)
+                {
                     return;
                 }
                 let Some(modules) = self.module_members.get(name).cloned() else {

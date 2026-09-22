@@ -119,7 +119,14 @@ impl Parser {
     // ─── import / declare ─────────────────────────────────────────────────────
 
     fn parse_import(&mut self) -> Result<Stmt, ParseError> {
-        self.advance(); // import
+        let import_line = self.advance().line; // import
+        if !self.is_contextual("type") {
+            return Err(ParseError(format!(
+                "[{}] expected 'type' after 'import'; use `import type <module>`",
+                import_line
+            )));
+        }
+        self.advance(); // contextual `type`
         let module_name = self.eat_ident()?;
         Ok(Stmt::ImportDecl { module_name })
     }
