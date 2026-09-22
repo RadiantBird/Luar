@@ -16,7 +16,9 @@
     "lua",
     "oop"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onLanguage:luar"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "configuration": {
