@@ -1,5 +1,7 @@
 import { Lexer } from "../../luar/src/lexer/lexer";
 import type { Token } from "../../luar/src/lexer/token";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { Parser } from "../../luar/src/parser/parser";
 import type {
   ClassDecl,
@@ -32,6 +34,136 @@ export interface DocumentIndex {
   keywords: string[];
 }
 
+export interface ModuleDeclaration {
+  name: string;
+  isGlobal: boolean;
+  typeText: string;
+  line: number;
+  col: number;
+  endLine: number;
+  endCol: number;
+}
+
+export interface ModuleDefinition {
+  moduleName: string;
+  filePath: string;
+  declarations: ModuleDeclaration[];
+  members: ModuleDeclaration[];
+  globals: ModuleDeclaration[];
+}
+
+export interface ModuleDefinitionError {
+  message: string;
+  line: number;
+  col: number;
+}
+
+export interface ModuleDefinitionResult {
+  definition: ModuleDefinition | null;
+  errors: ModuleDefinitionError[];
+}
+
+/** Parse the deliberately small .luard grammar used by the Rust compiler. */
+export function parseModuleDefinition(moduleName: string, source: string, filePath = `${moduleName}.luard`): ModuleDefinitionResult {
+  const errors: ModuleDefinitionError[] = [];
+  let tokens: Token[];
+  try {
+    tokens = new Lexer(source).tokenize();
+  } catch (error) {
+    errors.push(moduleError(filePath, 1, 1, errorMessage(error)));
+    return { definition: null, errors };
+  }
+
+  const declarations: ModuleDeclaration[] = [];
+  const names = new Set<string>();
+  let pos = 0;
+  while (tokens[pos]?.kind !== "EOF") {
+    const declare = tokens[pos];
+    if (!declare || declare.kind !== "declare") {
+      errors.push(moduleError(filePath, declare?.line ?? 1, declare?.col ?? 1, "expected 'declare'"));
+      break;
+    }
+    pos++;
+    const isGlobal = tokens[pos]?.kind === "global";
+    if (isGlobal) pos++;
+    const name = tokens[pos];
+    if (!name || name.kind !== "Ident") {
+      errors.push(moduleError(filePath, name?.line ?? declare.line, name?.col ?? declare.col, "expected identifier"));
+      pos = nextDeclaration(tokens, pos);
+      continue;
+    }
+    pos++;
+    const colon = tokens[pos];
+    if (!colon || colon.kind !== ":") {
+      errors.push(moduleError(filePath, colon?.line ?? name.line, colon?.col ?? name.col, "expected ':'"));
+      pos = nextDeclaration(tokens, pos);
+      continue;
+    }
+    pos++;
+    const typeStart = pos;
+    const typeEnd = parseDefinitionType(tokens, pos);
+    if (typeEnd < 0) {
+      const bad = tokens[typeStart] ?? colon;
+      errors.push(moduleError(filePath, bad.line, bad.col, "expected type"));
+      pos = nextDeclaration(tokens, typeStart);
+      continue;
+    }
+    pos = typeEnd;
+    const lastTypeToken = tokens[pos - 1]!;
+    const typeText = sourceTextBetween(source, tokens[typeStart]!, lastTypeToken);
+    const declaration: ModuleDeclaration = {
+      name: name.value,
+      isGlobal,
+      typeText,
+      line: name.line - 1,
+      col: name.col - 1,
+      endLine: lastTypeToken.line - 1,
+      endCol: lastTypeToken.col - 1 + lastTypeToken.value.length,
+    };
+    if (names.has(name.value)) {
+      errors.push(moduleError(filePath, name.line, name.col, `name '${name.value}' is declared more than once`));
+    } else {
+      names.add(name.value);
+      declarations.push(declaration);
+    }
+  }
+
+  const definition: ModuleDefinition = {
+    moduleName,
+    filePath,
+    declarations,
+    members: declarations.filter((declaration) => !declaration.isGlobal),
+    globals: declarations.filter((declaration) => declaration.isGlobal),
+  };
+  return { definition, errors };
+}
+
+export function loadModuleDefinition(moduleName: string, sourcePath: string): ModuleDefinitionResult {
+  const filePath = path.join(path.dirname(sourcePath), `${moduleName}.luard`);
+  try {
+    return parseModuleDefinition(moduleName, fs.readFileSync(filePath, "utf8"), filePath);
+  } catch (error) {
+    return { definition: null, errors: [moduleError(filePath, 1, 1, `cannot read module definition: ${errorMessage(error)}`)] };
+  }
+}
+
+export function importsInDocument(source: string): Array<{ name: string; line: number; col: number }> {
+  let tokens: Token[];
+  try {
+    tokens = new Lexer(source).tokenize();
+  } catch {
+    return [];
+  }
+  const imports: Array<{ name: string; line: number; col: number }> = [];
+  for (let i = 0; i + 1 < tokens.length; i++) {
+    if (tokens[i]!.kind === "import" && tokens[i + 1]!.kind === "Ident") {
+      const token = tokens[i + 1]!;
+      imports.push({ name: token.value, line: token.line - 1, col: token.col - 1 });
+    }
+  }
+  return imports;
+}
+
 const KEYWORDS = [
   "class", "is", "public", "private", "static", "abstract", "override", "final", "super",
   "operator", "import", "declare", "global", "function", "end", "local", "return", "self",
@@ -39,7 +171,7 @@ const KEYWORDS = [
   "continue", "and", "or", "not", "true", "false", "nil", "const",
 ];
 
-export function indexDocument(source: string): DocumentIndex {
+export function indexDocument(source: string, moduleDefinitions: ModuleDefinition[] = []): DocumentIndex {
   const index: DocumentIndex = { symbols: [], classes: new Map(), members: new Map(), keywords: KEYWORDS };
   let program: Program;
   let tokens: Token[];
@@ -52,7 +184,9 @@ export function indexDocument(source: string): DocumentIndex {
     // indexes declarations and class members without requiring a complete AST.
     try {
       tokens = new Lexer(source).tokenize();
-      return indexTokens(index, tokens);
+      indexTokens(index, tokens);
+      addModuleDefinitions(index, moduleDefinitions);
+      return index;
     } catch {
       return index;
     }
@@ -96,7 +230,89 @@ export function indexDocument(source: string): DocumentIndex {
     }
     collectFunctions(stmt, index, tokens, searchFrom);
   }
+  addModuleDefinitions(index, moduleDefinitions);
   return index;
+}
+
+function addModuleDefinitions(index: DocumentIndex, definitions: ModuleDefinition[]): void {
+  for (const definition of definitions) {
+    const moduleSymbol = index.symbols.find((symbol) => symbol.kind === "module" && symbol.name === definition.moduleName);
+    if (!moduleSymbol) continue;
+    for (const declaration of definition.members) {
+      const symbol = makeSymbol(
+        declaration.name,
+        "field",
+        `${declaration.name}: ${declaration.typeText}`,
+        { line: declaration.line + 1, col: declaration.col + 1, value: declaration.name } as Token,
+        { line: declaration.endLine + 1, col: declaration.endCol + 1, value: declaration.name } as Token,
+        definition.moduleName,
+      );
+      addSymbol(index, symbol);
+    }
+    for (const declaration of definition.globals) {
+      addSymbol(index, makeSymbol(
+        declaration.name,
+        "variable",
+        `declare global ${declaration.name}: ${declaration.typeText}`,
+        { line: declaration.line + 1, col: declaration.col + 1, value: declaration.name } as Token,
+        { line: declaration.endLine + 1, col: declaration.endCol + 1, value: declaration.name } as Token,
+      ));
+    }
+  }
+}
+
+function parseDefinitionType(tokens: Token[], start: number): number {
+  let pos = start;
+  if (tokens[pos]?.kind === "(") {
+    pos++;
+    if (tokens[pos]?.kind !== ")") {
+      const first = parseDefinitionType(tokens, pos);
+      if (first < 0) return -1;
+      pos = first;
+      while (tokens[pos]?.kind === ",") {
+        const next = parseDefinitionType(tokens, pos + 1);
+        if (next < 0) return -1;
+        pos = next;
+      }
+    }
+    if (tokens[pos]?.kind !== ")") return -1;
+    pos++;
+  } else if (tokens[pos]?.kind === "Ident") {
+    pos++;
+  } else {
+    return -1;
+  }
+  if (tokens[pos]?.kind === "?") pos++;
+  return pos;
+}
+
+function nextDeclaration(tokens: Token[], start: number): number {
+  for (let i = Math.max(start, 0); i < tokens.length; i++) {
+    if (tokens[i]!.kind === "declare" || tokens[i]!.kind === "EOF") return i;
+  }
+  return tokens.length - 1;
+}
+
+function sourceTextBetween(source: string, first: Token, last: Token): string {
+  const lines = source.split(/\r?\n/);
+  const startLine = lines[first.line - 1] ?? "";
+  const endLine = lines[last.line - 1] ?? "";
+  if (first.line === last.line) {
+    return startLine.slice(first.col - 1, last.col - 1 + last.value.length).trim();
+  }
+  return [
+    startLine.slice(first.col - 1),
+    ...lines.slice(first.line, last.line - 1),
+    endLine.slice(0, last.col - 1 + last.value.length),
+  ].join("\n").trim();
+}
+
+function moduleError(filePath: string, line: number, col: number, message: string): ModuleDefinitionError {
+  return { message: `${filePath}:${line}: ${message}`, line: Math.max(line - 1, 0), col: Math.max(col - 1, 0) };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function indexTokens(index: DocumentIndex, tokens: Token[]): DocumentIndex {

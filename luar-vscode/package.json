@@ -23,7 +23,7 @@
       {
         "id": "luar",
         "aliases": ["Luar", "luar"],
-        "extensions": [".luar"],
+        "extensions": [".luar", ".luard"],
         "configuration": "./language-configuration.json"
       }
     ],

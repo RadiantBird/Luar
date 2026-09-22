@@ -18,14 +18,22 @@ import {
   SymbolKind as LspSymbolKind,
 } from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
+import { fileURLToPath } from "node:url";
 
 import { Parser } from "../../luar/src/parser/parser";
 import { Checker } from "../../luar/src/checker/checker";
-import { indexDocument, type DocumentIndex, type LanguageSymbol } from "./language";
+import {
+  importsInDocument,
+  indexDocument,
+  loadModuleDefinition,
+  type DocumentIndex,
+  type LanguageSymbol,
+} from "./language";
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
 const indexes = new Map<string, DocumentIndex>();
+const moduleDiagnostics = new Map<string, Diagnostic[]>();
 
 connection.onInitialize((_params: InitializeParams): InitializeResult => ({
   capabilities: {
@@ -40,6 +48,7 @@ documents.onDidChangeContent(({ document }) => { updateIndex(document); validate
 documents.onDidOpen(({ document }) => { updateIndex(document); validate(document); });
 documents.onDidClose(({ document }) => {
   indexes.delete(document.uri);
+  moduleDiagnostics.delete(document.uri);
   connection.sendDiagnostics({ uri: document.uri, diagnostics: [] });
 });
 
@@ -70,7 +79,10 @@ connection.onHover((params): Hover | null => {
   const word = wordAt(document, params.position);
   if (!word) return null;
   const index = getIndex(document);
-  const symbol = index.symbols.find((candidate) => candidate.name === word);
+  const lineText = document.getText({ start: { line: params.position.line, character: 0 }, end: { line: params.position.line + 1, character: 0 } }).split("\n")[0] ?? "";
+  const receiver = lineText.slice(0, params.position.character).match(/([A-Za-z_][A-Za-z0-9_]*)\.[A-Za-z_][A-Za-z0-9_]*$/)?.[1];
+  const symbol = index.symbols.find((candidate) => candidate.name === word && (!receiver || candidate.parent === receiver))
+    ?? index.symbols.find((candidate) => candidate.name === word);
   if (!symbol) return null;
   return { contents: { kind: MarkupKind.Markdown, value: `\`luar\n${symbol.signature}\n\`` } };
 });
@@ -80,20 +92,76 @@ connection.onDocumentSymbol((params): DocumentSymbol[] => {
   if (!document) return [];
   const index = getIndex(document);
   return index.symbols.filter((symbol) => !symbol.parent).map((symbol) => {
-    const children = index.symbols.filter((child) => child.parent === symbol.name).map(toDocumentSymbol);
+    // Module members come from another file, so their source ranges are not
+    // valid ranges in this document. Keep the import itself in the outline.
+    const children = symbol.kind === "module"
+      ? []
+      : index.symbols.filter((child) => child.parent === symbol.name).map(toDocumentSymbol);
     const result = toDocumentSymbol(symbol);
     if (children.length) result.children = children;
     return result;
   });
 });
 
-function updateIndex(document: TextDocument): void { indexes.set(document.uri, indexDocument(document.getText())); }
+function updateIndex(document: TextDocument): void {
+  const modules = resolveModules(document);
+  indexes.set(document.uri, indexDocument(document.getText(), modules.definitions));
+  moduleDiagnostics.set(document.uri, modules.diagnostics);
+}
 function getIndex(document: TextDocument): DocumentIndex {
   const current = indexes.get(document.uri);
   if (current) return current;
   const created = indexDocument(document.getText());
   indexes.set(document.uri, created);
   return created;
+}
+
+function resolveModules(document: TextDocument): { definitions: NonNullable<ReturnType<typeof loadModuleDefinition>["definition"]>[]; diagnostics: Diagnostic[] } {
+  const definitions: NonNullable<ReturnType<typeof loadModuleDefinition>["definition"]>[] = [];
+  const diagnostics: Diagnostic[] = [];
+  const imports = importsInDocument(document.getText());
+  const seen = new Set<string>();
+  let sourcePath: string;
+  try {
+    sourcePath = fileURLToPath(document.uri);
+  } catch {
+    return { definitions, diagnostics };
+  }
+
+  for (const imported of imports) {
+    if (seen.has(imported.name)) {
+      diagnostics.push({
+        severity: DiagnosticSeverity.Error,
+        range: importRange(imported.line, imported.col, imported.name),
+        message: `module '${imported.name}' is imported more than once`,
+        source: "luar",
+      });
+      continue;
+    }
+    seen.add(imported.name);
+    const result = loadModuleDefinition(imported.name, sourcePath);
+    if (result.definition) definitions.push(result.definition);
+    if (result.errors.length === 0) continue;
+    for (const error of result.errors) {
+      diagnostics.push({
+        severity: DiagnosticSeverity.Error,
+        range: errorRange(error, imported.line, imported.col),
+        message: error.message,
+        source: "luar",
+      });
+    }
+  }
+  return { definitions, diagnostics };
+}
+
+function importRange(line: number, col: number, name: string): Range {
+  return Range.create(line, col, line, col + name.length);
+}
+
+function errorRange(error: { line: number; col: number }, fallbackLine: number, fallbackCol: number): Range {
+  const line = error.line >= 0 ? error.line : fallbackLine;
+  const col = error.col >= 0 ? error.col : fallbackCol;
+  return Range.create(line, col, line, col + 1);
 }
 function completionFor(symbol: LanguageSymbol): CompletionItem {
   const kinds: Record<LanguageSymbol["kind"], CompletionItemKind> = { class: CompletionItemKind.Class, method: CompletionItemKind.Method, field: CompletionItemKind.Field, function: CompletionItemKind.Function, variable: CompletionItemKind.Variable, module: CompletionItemKind.Module };
@@ -116,6 +184,12 @@ function wordAt(document: TextDocument, position: Position): string | null {
 function validate(document: TextDocument): void {
   const src = document.getText();
   const diagnostics: Diagnostic[] = [];
+
+  // .luard files are definition files, not compilable .luar programs.
+  if (document.uri.toLowerCase().endsWith(".luard")) {
+    connection.sendDiagnostics({ uri: document.uri, diagnostics: [] });
+    return;
+  }
 
   try {
     const prog = new Parser(src).parse();
@@ -148,6 +222,8 @@ function validate(document: TextDocument): void {
       });
     }
   }
+
+  diagnostics.push(...(moduleDiagnostics.get(document.uri) ?? []));
 
   connection.sendDiagnostics({ uri: document.uri, diagnostics });
 }
