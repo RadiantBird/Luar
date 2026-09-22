@@ -1,11 +1,14 @@
 use crate::ast::*;
+use crate::lexer::SourceSpan;
 use crate::modules::ModuleDefinition;
+use crate::{Severity, Target};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct ResolveError {
     pub message: String,
-    pub line: usize,
+    pub span: SourceSpan,
+    pub severity: Severity,
 }
 
 pub struct Resolver {
@@ -13,11 +16,12 @@ pub struct Resolver {
     module_members: HashMap<String, Vec<String>>,
     module_globals: HashSet<String>,
     imported_modules: HashSet<String>,
+    standard_globals: HashSet<String>,
     scopes: Vec<HashMap<String, bool>>,
 }
 
 impl Resolver {
-    pub fn new(definitions: Vec<ModuleDefinition>) -> Self {
+    pub fn new(definitions: Vec<ModuleDefinition>, target: Target) -> Self {
         let mut module_members: HashMap<String, Vec<String>> = HashMap::new();
         let mut module_globals = HashSet::new();
         let mut imported_modules = HashSet::new();
@@ -39,6 +43,7 @@ impl Resolver {
             module_members,
             module_globals,
             imported_modules,
+            standard_globals: standard_globals(target),
             scopes: vec![HashMap::new()],
         }
     }
@@ -99,7 +104,7 @@ impl Resolver {
             }
             Stmt::Assign { targets, values } => {
                 for target in targets {
-                    if let Expr::Ident(name) = target {
+                    if let Expr::Ident { name, .. } = target {
                         if self.is_const(name) {
                             self.error(format!("cannot assign to const binding '{name}'"));
                         }
@@ -221,7 +226,7 @@ impl Resolver {
 
     fn visit_expr(&mut self, expr: &mut Expr) {
         match expr {
-            Expr::Ident(name) => {
+            Expr::Ident { name, span } => {
                 // A type import identifies an externally supplied module table,
                 // but never creates a lexical binding. This keeps qualified
                 // access intact while allowing `local` or `const` bindings such
@@ -229,16 +234,27 @@ impl Resolver {
                 if self.lookup(name).is_some()
                     || self.imported_modules.contains(name)
                     || self.module_globals.contains(name)
+                    || self.standard_globals.contains(name)
                 {
                     return;
                 }
                 let Some(modules) = self.module_members.get(name).cloned() else {
+                    self.warning(
+                        format!(
+                            "unknown global '{}'; declare it in an imported .luard file with `declare global {name}: <T>`",
+                            name
+                        ),
+                        *span,
+                    );
                     return;
                 };
                 if modules.len() == 1 {
                     let field = name.clone();
                     *expr = Expr::Field {
-                        obj: Box::new(Expr::Ident(modules[0].clone())),
+                        obj: Box::new(Expr::Ident {
+                            name: modules[0].clone(),
+                            span: *span,
+                        }),
                         name: field,
                     };
                 } else {
@@ -358,6 +374,75 @@ impl Resolver {
     }
 
     fn error(&mut self, message: String) {
-        self.errors.push(ResolveError { message, line: 0 });
+        self.errors.push(ResolveError {
+            message,
+            span: SourceSpan {
+                line: 1,
+                column: 1,
+                end_line: 1,
+                end_column: 2,
+            },
+            severity: Severity::Error,
+        });
     }
+
+    fn warning(&mut self, message: String, span: SourceSpan) {
+        self.errors.push(ResolveError {
+            message,
+            span,
+            severity: Severity::Warning,
+        });
+    }
+}
+
+fn standard_globals(target: Target) -> HashSet<String> {
+    let mut names = [
+        "_G",
+        "assert",
+        "collectgarbage",
+        "dofile",
+        "error",
+        "getmetatable",
+        "ipairs",
+        "load",
+        "loadfile",
+        "next",
+        "pairs",
+        "pcall",
+        "print",
+        "rawequal",
+        "rawget",
+        "rawlen",
+        "rawset",
+        "require",
+        "select",
+        "setmetatable",
+        "tonumber",
+        "tostring",
+        "type",
+        "xpcall",
+        "coroutine",
+        "debug",
+        "io",
+        "math",
+        "os",
+        "package",
+        "string",
+        "table",
+        "utf8",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<HashSet<_>>();
+    if target == Target::Luau {
+        names.extend(
+            [
+                "bit32", "buffer", "gcinfo", "getfenv", "newproxy", "setfenv", "task", "typeof",
+                "warn",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+    }
+    names
 }

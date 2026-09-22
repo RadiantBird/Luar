@@ -18,6 +18,23 @@ Get-Command luar -All
 
 VS Code拡張はPATH上の`luar`へ未保存の本文を渡し、Rustコンパイラと同じ診断を表示する。別の実行ファイルを使う場合は`luar.compiler.path`、互換性検査の対象は`luar.target`（`luau`または`lua54`）で設定する。コンパイラが見つからない場合もハイライトと補完は利用できるが、意味診断は無効になる。
 
+## lintと外部runtime
+
+構文エラーと未定義globalの診断は、原因となるtoken全体を赤線または黄線で示す。未定義globalはLuaのruntime依存値を扱えるようwarningであり、`luar check`の終了コードを失敗にしない。Lua/Luau標準globalはあらかじめ認識する。
+
+外部runtimeは設定項目ではなく、通常の`.luard`で宣言して使い回す。
+
+```lua
+-- love.luard
+declare global love: Love
+
+-- main.luar
+import type love
+love.graphics.print("hello")
+```
+
+`import type love`は宣言だけを読み、`require`などの実行時コードを生成しない。未宣言の`love`や綴り誤りの`lovve`はwarningになる。
+
 ## 概要
 Luau言語から派生し、ついにオブジェクト指向・テーブルのディープコピーを実現。
 

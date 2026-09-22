@@ -1,8 +1,29 @@
 use crate::ast::*;
-use crate::lexer::{Lexer, Token, TokenKind};
+use crate::lexer::{Lexer, SourceSpan, Token, TokenKind};
 
 #[derive(Debug)]
-pub struct ParseError(pub String);
+pub struct ParseError {
+    pub message: String,
+    pub span: SourceSpan,
+}
+
+impl ParseError {
+    fn lexer(message: String) -> Self {
+        let line = message
+            .rsplit_once("line ")
+            .and_then(|(_, value)| value.parse().ok())
+            .unwrap_or(1);
+        Self {
+            message,
+            span: SourceSpan {
+                line,
+                column: 1,
+                end_line: line,
+                end_column: 2,
+            },
+        }
+    }
+}
 
 pub struct Parser {
     tokens: Vec<Token>,
@@ -12,7 +33,7 @@ pub struct Parser {
 impl Parser {
     pub fn new(src: &str) -> Result<Self, ParseError> {
         let mut lex = Lexer::new(src);
-        let tokens = lex.tokenize().map_err(ParseError)?;
+        let tokens = lex.tokenize().map_err(ParseError::lexer)?;
         Ok(Parser { tokens, pos: 0 })
     }
 
@@ -46,10 +67,7 @@ impl Parser {
             Ok(self.advance())
         } else {
             let t = self.peek();
-            Err(ParseError(format!(
-                "[{}] expected {:?}, got {:?}",
-                t.line, k, t.kind
-            )))
+            Err(self.error(format!("[{}] expected {:?}, got {:?}", t.line, k, t.kind)))
         }
     }
     fn eat_ident(&mut self) -> Result<String, ParseError> {
@@ -57,10 +75,17 @@ impl Parser {
             Ok(self.advance().value.clone())
         } else {
             let t = self.peek();
-            Err(ParseError(format!(
+            Err(self.error(format!(
                 "[{}] expected identifier, got {:?}",
                 t.line, t.kind
             )))
+        }
+    }
+
+    fn error(&self, message: String) -> ParseError {
+        ParseError {
+            message,
+            span: self.peek().span(),
         }
     }
 
@@ -133,7 +158,7 @@ impl Parser {
     fn parse_import(&mut self) -> Result<Stmt, ParseError> {
         let import_line = self.advance().line; // import
         if !self.is_contextual("type") {
-            return Err(ParseError(format!(
+            return Err(self.error(format!(
                 "[{}] expected 'type' after 'import'; use `import type <module>`",
                 import_line
             )));
@@ -187,7 +212,7 @@ impl Parser {
             types.push(self.try_parse_type_annotation()?);
         }
         if !self.match_tok(&TokenKind::Eq) {
-            return Err(ParseError(format!(
+            return Err(self.error(format!(
                 "[{line}] const declaration must have an initializer"
             )));
         }
@@ -197,7 +222,7 @@ impl Parser {
             Some(Expr::Call { .. } | Expr::MethodCall { .. } | Expr::Vararg)
         );
         if values.len() < names.len() && !final_value_can_expand {
-            return Err(ParseError(format!(
+            return Err(self.error(format!(
                 "[{line}] every const binding must have an initializer"
             )));
         }
@@ -293,7 +318,7 @@ impl Parser {
         } else if targets.len() == 1 {
             Ok(Stmt::ExprStmt(targets.remove(0)))
         } else {
-            Err(ParseError(format!(
+            Err(self.error(format!(
                 "[{}] expected '=' after expression list",
                 self.peek().line
             )))
@@ -492,7 +517,7 @@ impl Parser {
         }
         if is_static {
             let t = self.peek();
-            return Err(ParseError(format!(
+            return Err(self.error(format!(
                 "[{}] 'static' must be followed by a function declaration",
                 t.line
             )));
@@ -580,7 +605,7 @@ impl Parser {
             TokenKind::Hash => "#",
             _ => {
                 let t = self.peek();
-                return Err(ParseError(format!(
+                return Err(self.error(format!(
                     "[{}] unsupported overloaded operator '{}'",
                     t.line, t.value
                 )));
@@ -889,8 +914,12 @@ impl Parser {
                 Ok(Expr::SuperExpr)
             }
             TokenKind::Ident => {
-                let n = self.advance().value.clone();
-                Ok(Expr::Ident(n))
+                let token = self.advance().clone();
+                let span = token.span();
+                Ok(Expr::Ident {
+                    name: token.value,
+                    span,
+                })
             }
             TokenKind::LParen => {
                 self.advance();
@@ -919,7 +948,7 @@ impl Parser {
             }
             _ => {
                 let t = self.peek();
-                Err(ParseError(format!(
+                Err(self.error(format!(
                     "[{}] unexpected token {:?} in expression",
                     t.line, t.kind
                 )))
@@ -983,29 +1012,29 @@ impl Parser {
                         index += 1;
                     }
                     if depth != 0 {
-                        return Err(ParseError(format!(
+                        return Err(self.error(format!(
                             "[{line}] unterminated expression in interpolated string"
                         )));
                     }
                     let expression = chars[start..index - 1].iter().collect::<String>();
                     if expression.trim().is_empty() {
-                        return Err(ParseError(format!(
-                            "[{line}] empty expression in interpolated string"
-                        )));
+                        return Err(
+                            self.error(format!("[{line}] empty expression in interpolated string"))
+                        );
                     }
                     let mut parser = Parser::new(&expression)?;
                     let expression = parser.parse_expr()?;
                     if !parser.is_at_end() {
-                        return Err(ParseError(format!(
+                        return Err(self.error(format!(
                             "[{line}] invalid expression in interpolated string"
                         )));
                     }
                     parts.push(InterpolatedPart::Expr(expression));
                 }
                 '}' => {
-                    return Err(ParseError(format!(
-                        "[{line}] unmatched '}}' in interpolated string"
-                    )));
+                    return Err(
+                        self.error(format!("[{line}] unmatched '}}' in interpolated string"))
+                    );
                 }
                 character => {
                     literal.push(character);

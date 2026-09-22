@@ -486,5 +486,9 @@ end
     .expect("lexer should accept ~=")
     .parse()
     .expect_err("~= is not a supported overloaded operator");
-    assert!(parse_error.0.contains("unsupported overloaded operator"));
+    assert!(
+        parse_error
+            .message
+            .contains("unsupported overloaded operator")
+    );
 }

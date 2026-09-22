@@ -2,6 +2,8 @@
 
 画像なしで動く、落ちてくる星を受け止める小さな LÖVE ゲームです。`main.luar` は`import type colors`で補完用の`colors.luard`を読み、実体は`!include("./colors.luar")`でinline展開します。
 
+`love`はLÖVE runtimeが提供するambient globalであるため、`love.luard`の`declare global love: Love`を`import type love`で読み込む。これにより、未定義global warningを抑制しつつ、実体のロードコードは生成しない。
+
 PowerShellで、リポジトリ直下から次を実行します。
 
 ```powershell

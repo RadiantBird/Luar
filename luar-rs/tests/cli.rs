@@ -22,12 +22,7 @@ fn check_stdin_emits_the_editor_json_diagnostic_schema() {
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"goto missing")
-        .unwrap();
+    child.stdin.take().unwrap().write_all(b"local = 1").unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(!output.status.success());
 
@@ -35,16 +30,48 @@ fn check_stdin_emits_the_editor_json_diagnostic_schema() {
     let diagnostic = &report["diagnostics"][0];
     assert_eq!(diagnostic["file"], "C:\\project\\main.luar");
     assert_eq!(diagnostic["line"], 1);
-    assert_eq!(diagnostic["column"], 1);
+    assert_eq!(diagnostic["column"], 7);
     assert_eq!(diagnostic["endLine"], 1);
-    assert_eq!(diagnostic["endColumn"], 1);
+    assert_eq!(diagnostic["endColumn"], 8);
     assert_eq!(diagnostic["severity"], "error");
     assert!(
         diagnostic["message"]
             .as_str()
             .unwrap()
-            .contains("undefined label")
+            .contains("expected identifier")
     );
+}
+
+#[test]
+fn unknown_globals_are_warnings_with_the_identifier_range() {
+    let mut child = luar()
+        .args([
+            "check",
+            "--stdin",
+            "--source-path",
+            "C:\\project\\main.luar",
+            "--diagnostic-format",
+            "json",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"lovve.graphics.print('hello')")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "warnings must not fail check");
+
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let diagnostic = &report["diagnostics"][0];
+    assert_eq!(diagnostic["severity"], "warning");
+    assert_eq!(diagnostic["column"], 1);
+    assert_eq!(diagnostic["endColumn"], 6);
+    assert!(diagnostic["message"].as_str().unwrap().contains("lovve"));
 }
 
 #[test]

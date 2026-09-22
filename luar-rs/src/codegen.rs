@@ -203,7 +203,7 @@ impl Codegen {
     }
     fn resolve_type(&self, expr: &Expr) -> Option<String> {
         match expr {
-            Expr::Ident(n) => {
+            Expr::Ident { name: n, .. } => {
                 for frame in self.type_env.iter().rev() {
                     if let Some(t) = frame.get(n) {
                         return Some(t.clone());
@@ -215,7 +215,7 @@ impl Codegen {
             Expr::Call { callee, .. } => {
                 if let Expr::Field { obj, name } = callee.as_ref() {
                     if name == "new" {
-                        if let Expr::Ident(cn) = obj.as_ref() {
+                        if let Expr::Ident { name: cn, .. } = obj.as_ref() {
                             if self.registry.contains_key(cn) {
                                 return Some(cn.clone());
                             }
@@ -942,7 +942,7 @@ impl Codegen {
             }
             Expr::InterpolatedString(parts) => self.emit_interpolated(parts),
             Expr::Vararg => "...".to_string(),
-            Expr::Ident(n) => n.clone(),
+            Expr::Ident { name: n, .. } => n.clone(),
             Expr::SelfExpr => "self".to_string(),
             Expr::SuperExpr => self.parent_name().unwrap_or_else(|| "nil".to_string()),
             Expr::Field { obj, name } => {
@@ -973,7 +973,10 @@ impl Codegen {
                         return format!("{parent}.{name}({all_args})");
                     }
                     let receiver = self.emit_expr(obj);
-                    if let Expr::Ident(class_name) = obj.as_ref() {
+                    if let Expr::Ident {
+                        name: class_name, ..
+                    } = obj.as_ref()
+                    {
                         if self.registry.contains_key(class_name) {
                             if let Some(call) =
                                 self.private_method_call(class_name, name, &receiver, &args_str)

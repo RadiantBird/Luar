@@ -88,12 +88,36 @@ pub struct Token {
     pub kind: TokenKind,
     pub value: String,
     pub line: usize,
+    /// One-based UTF-16 positions, matching the LSP coordinate system.
+    pub column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceSpan {
+    pub line: usize,
+    pub column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+}
+
+impl Token {
+    pub fn span(&self) -> SourceSpan {
+        SourceSpan {
+            line: self.line,
+            column: self.column,
+            end_line: self.end_line,
+            end_column: self.end_column,
+        }
+    }
 }
 
 pub struct Lexer {
     src: Vec<char>,
     pos: usize,
     line: usize,
+    column: usize,
 }
 
 impl Lexer {
@@ -102,6 +126,7 @@ impl Lexer {
             src: src.chars().collect(),
             pos: 0,
             line: 1,
+            column: 1,
         }
     }
 
@@ -114,6 +139,9 @@ impl Lexer {
                     kind: TokenKind::Eof,
                     value: String::new(),
                     line: self.line,
+                    column: self.column,
+                    end_line: self.line,
+                    end_column: self.column,
                 });
                 break;
             }
@@ -134,6 +162,9 @@ impl Lexer {
         self.pos += 1;
         if c == '\n' {
             self.line += 1;
+            self.column = 1;
+        } else {
+            self.column += c.len_utf16();
         }
         c
     }
@@ -144,7 +175,8 @@ impl Lexer {
                 self.advance();
             }
             if self.peek() == '-' && self.peek2() == '-' {
-                self.pos += 2;
+                self.advance();
+                self.advance();
                 if self.peek() == '[' {
                     let level = self.count_long_bracket();
                     if level >= 0 {
@@ -153,7 +185,7 @@ impl Lexer {
                     }
                 }
                 while self.pos < self.src.len() && self.peek() != '\n' {
-                    self.pos += 1;
+                    self.advance();
                 }
             } else {
                 break;
@@ -182,7 +214,9 @@ impl Lexer {
 
     fn read_long_string(&mut self, level: usize) -> Result<String, String> {
         // consume opening [=*[
-        self.pos += 1 + level + 1;
+        for _ in 0..(level + 2) {
+            self.advance();
+        }
         if self.peek() == '\n' {
             self.advance();
         }
@@ -214,6 +248,7 @@ impl Lexer {
 
     fn next_token(&mut self) -> Result<Token, String> {
         let line = self.line;
+        let column = self.column;
         let c = self.peek();
 
         // Long strings
@@ -225,28 +260,31 @@ impl Lexer {
                     kind: TokenKind::LuaString,
                     value: s,
                     line,
+                    column,
+                    end_line: self.line,
+                    end_column: self.column,
                 });
             }
         }
 
         // Strings
         if c == '"' || c == '\'' {
-            return self.read_string(c, line);
+            return self.read_string(c, line, column);
         }
 
         // Template strings (backtick)
         if c == '`' {
-            return self.read_template_string(line);
+            return self.read_template_string(line, column);
         }
 
         // Numbers
         if c.is_ascii_digit() || (c == '.' && self.peek2().is_ascii_digit()) {
-            return Ok(self.read_number(line));
+            return Ok(self.read_number(line, column));
         }
 
         // Identifiers and keywords
         if c.is_alphabetic() || c == '_' {
-            return Ok(self.read_ident_or_keyword(line));
+            return Ok(self.read_ident_or_keyword(line, column));
         }
 
         // Operators and punctuation
@@ -341,10 +379,13 @@ impl Lexer {
             kind,
             value: c.to_string(),
             line,
+            column,
+            end_line: self.line,
+            end_column: self.column,
         })
     }
 
-    fn read_string(&mut self, quote: char, line: usize) -> Result<Token, String> {
+    fn read_string(&mut self, quote: char, line: usize, column: usize) -> Result<Token, String> {
         self.advance(); // opening quote
         let mut s = String::new();
         loop {
@@ -377,10 +418,13 @@ impl Lexer {
             kind: TokenKind::LuaString,
             value: s,
             line,
+            column,
+            end_line: self.line,
+            end_column: self.column,
         })
     }
 
-    fn read_template_string(&mut self, line: usize) -> Result<Token, String> {
+    fn read_template_string(&mut self, line: usize, column: usize) -> Result<Token, String> {
         self.advance(); // opening `
         let mut s = String::new();
         let mut escaped = false;
@@ -408,10 +452,13 @@ impl Lexer {
             kind: TokenKind::TemplateString,
             value: s,
             line,
+            column,
+            end_line: self.line,
+            end_column: self.column,
         })
     }
 
-    fn read_number(&mut self, line: usize) -> Token {
+    fn read_number(&mut self, line: usize, column: usize) -> Token {
         let mut s = String::new();
         while self.pos < self.src.len()
             && (self.peek().is_ascii_alphanumeric() || self.peek() == '.' || self.peek() == '_')
@@ -422,10 +469,13 @@ impl Lexer {
             kind: TokenKind::Number,
             value: s,
             line,
+            column,
+            end_line: self.line,
+            end_column: self.column,
         }
     }
 
-    fn read_ident_or_keyword(&mut self, line: usize) -> Token {
+    fn read_ident_or_keyword(&mut self, line: usize, column: usize) -> Token {
         let mut s = String::new();
         while self.pos < self.src.len() && (self.peek().is_alphanumeric() || self.peek() == '_') {
             s.push(self.advance());
@@ -474,6 +524,9 @@ impl Lexer {
             kind,
             value: s,
             line,
+            column,
+            end_line: self.line,
+            end_column: self.column,
         }
     }
 }

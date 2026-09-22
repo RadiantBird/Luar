@@ -1,5 +1,5 @@
 use luar_rs::{
-    CompileOptions, Diagnostic, DiagnosticReport, Target, check_source_with_options,
+    CompileOptions, Diagnostic, DiagnosticReport, Target, analyze_source_with_options,
     compile_source_with_options, dump_ir,
 };
 use std::env;
@@ -80,11 +80,12 @@ fn run() -> Result<(), ()> {
                 })?;
             }
         }
-        Command::Check => match check_source_with_options(&source, &options) {
-            Ok(_) => {
+        Command::Check => match analyze_source_with_options(&source, &options) {
+            Ok(analysis) => {
                 if cli.json {
-                    print_json(&[])?;
+                    print_json(&analysis.diagnostics)?;
                 } else {
+                    print_diagnostics(&analysis.diagnostics, false);
                     println!("{}: ok", source_path.display());
                 }
             }

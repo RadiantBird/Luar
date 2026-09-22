@@ -14,7 +14,10 @@ pub enum Expr {
     Str(String),
     InterpolatedString(Vec<InterpolatedPart>),
     Vararg,
-    Ident(String),
+    Ident {
+        name: String,
+        span: SourceSpan,
+    },
     SelfExpr,
     SuperExpr,
     Field {
@@ -205,3 +208,4 @@ pub struct MethodMember {
 pub struct Program {
     pub stmts: Vec<Stmt>,
 }
+use crate::lexer::SourceSpan;

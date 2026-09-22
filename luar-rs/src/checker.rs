@@ -638,7 +638,7 @@ impl Checker {
         current_class: Option<&str>,
     ) -> Option<ReceiverKind> {
         match expr {
-            Expr::Ident(n) => {
+            Expr::Ident { name: n, .. } => {
                 if let Some(class_name) = env.get(n) {
                     Some(ReceiverKind::Instance(class_name.clone()))
                 } else if self.classes.contains_key(n) {
@@ -651,7 +651,10 @@ impl Checker {
             Expr::Call { callee, .. } => {
                 if let Expr::Field { obj, name } = callee.as_ref() {
                     if name == "new" {
-                        if let Expr::Ident(class_name) = obj.as_ref() {
+                        if let Expr::Ident {
+                            name: class_name, ..
+                        } = obj.as_ref()
+                        {
                             if self.classes.contains_key(class_name) {
                                 return Some(ReceiverKind::Instance(class_name.clone()));
                             }

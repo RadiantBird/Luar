@@ -2,6 +2,7 @@
 -- Build with the lua54 target; LÖVE receives the generated main.lua.
 
 import type colors
+import type love
 local colors = !include("./colors.luar")
 
 local WIDTH = 800

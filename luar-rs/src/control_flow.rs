@@ -292,7 +292,7 @@ impl Validator {
             | Expr::Number(_)
             | Expr::Str(_)
             | Expr::Vararg
-            | Expr::Ident(_)
+            | Expr::Ident { .. }
             | Expr::SelfExpr
             | Expr::SuperExpr => {}
         }

@@ -8,6 +8,7 @@ pub mod modules;
 pub mod parser;
 pub mod resolver;
 
+use crate::lexer::SourceSpan;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
@@ -64,6 +65,12 @@ pub struct Diagnostic {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DiagnosticReport {
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Analysis {
+    pub program: ast::Program,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -263,14 +270,21 @@ pub fn compile_source_with_options(
     source: &str,
     options: &CompileOptions,
 ) -> Result<String, Vec<Diagnostic>> {
-    let program = check_source_with_options(source, options)?;
-    Ok(codegen::Codegen::for_target(options.target).generate(&program))
+    let analysis = analyze_source_with_options(source, options)?;
+    Ok(codegen::Codegen::for_target(options.target).generate(&analysis.program))
 }
 
 pub fn check_source_with_options(
     source: &str,
     options: &CompileOptions,
 ) -> Result<ast::Program, Vec<Diagnostic>> {
+    analyze_source_with_options(source, options).map(|analysis| analysis.program)
+}
+
+pub fn analyze_source_with_options(
+    source: &str,
+    options: &CompileOptions,
+) -> Result<Analysis, Vec<Diagnostic>> {
     let file = options
         .source_path
         .as_deref()
@@ -278,11 +292,22 @@ pub fn check_source_with_options(
         .unwrap_or_else(|| "<stdin>".to_string());
     let source = include::expand_source(source, options.source_path.as_deref(), options.target)
         .map_err(|error| vec![diagnostic_from_message(&file, &error)])?;
-    let mut parser = parser::Parser::new(&source)
-        .map_err(|error| vec![diagnostic_from_message(&file, &error.0)])?;
-    let mut program = parser
-        .parse()
-        .map_err(|error| vec![diagnostic_from_message(&file, &error.0)])?;
+    let mut parser = parser::Parser::new(&source).map_err(|error| {
+        vec![diagnostic_with_span(
+            &file,
+            error.span,
+            Severity::Error,
+            error.message,
+        )]
+    })?;
+    let mut program = parser.parse().map_err(|error| {
+        vec![diagnostic_with_span(
+            &file,
+            error.span,
+            Severity::Error,
+            error.message,
+        )]
+    })?;
     convert_raw_lua_markers(&mut program.stmts);
 
     let mut imports = Vec::new();
@@ -329,11 +354,12 @@ pub fn check_source_with_options(
         }
     }
 
-    let resolver_errors = resolver::Resolver::new(definitions).resolve(&mut program);
+    let resolver_errors =
+        resolver::Resolver::new(definitions, options.target).resolve(&mut program);
     errors.extend(
         resolver_errors
             .into_iter()
-            .map(|error| diagnostic(&file, error.line.max(1), error.message)),
+            .map(|error| diagnostic_with_span(&file, error.span, error.severity, error.message)),
     );
     let checker_errors = checker::Checker::new().check(&mut program);
     errors.extend(
@@ -349,11 +375,17 @@ pub fn check_source_with_options(
     if options.target == Target::Luau {
         errors.extend(validate_luau_label_layout(&program, &file));
     }
-    if !errors.is_empty() {
+    if errors
+        .iter()
+        .any(|diagnostic| diagnostic.severity == Severity::Error)
+    {
         return Err(errors);
     }
 
-    Ok(program)
+    Ok(Analysis {
+        program,
+        diagnostics: errors,
+    })
 }
 
 pub fn dump_ir(source: &str, options: &CompileOptions) -> Result<String, Vec<Diagnostic>> {
@@ -362,13 +394,32 @@ pub fn dump_ir(source: &str, options: &CompileOptions) -> Result<String, Vec<Dia
 }
 
 fn diagnostic(file: &str, line: usize, message: String) -> Diagnostic {
+    diagnostic_with_span(
+        file,
+        SourceSpan {
+            line: line.max(1),
+            column: 1,
+            end_line: line.max(1),
+            end_column: 2,
+        },
+        Severity::Error,
+        message,
+    )
+}
+
+fn diagnostic_with_span(
+    file: &str,
+    span: SourceSpan,
+    severity: Severity,
+    message: String,
+) -> Diagnostic {
     Diagnostic {
         file: file.to_string(),
-        line: line.max(1),
-        column: 1,
-        end_line: line.max(1),
-        end_column: 1,
-        severity: Severity::Error,
+        line: span.line.max(1),
+        column: span.column.max(1),
+        end_line: span.end_line.max(1),
+        end_column: span.end_column.max(span.column.saturating_add(1)),
+        severity,
         message,
     }
 }
@@ -400,7 +451,7 @@ fn convert_raw_lua_markers(stmts: &mut [ast::Stmt]) {
     for stmt in stmts {
         let raw = match stmt {
             Stmt::ExprStmt(Expr::Call { callee, args })
-                if matches!(callee.as_ref(), Expr::Ident(name) if name == "__luar_raw_lua54")
+                if matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "__luar_raw_lua54")
                     && args.len() == 1 =>
             {
                 match &args[0] {
