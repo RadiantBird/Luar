@@ -1,0 +1,9 @@
+local colors = {}
+
+colors.background = { 0.04, 0.06, 0.14 }
+colors.player = { 0.30, 0.82, 1.00 }
+colors.star = { 1.00, 0.89, 0.30 }
+colors.text = { 0.94, 0.96, 1.00 }
+colors.game_over = { 1.00, 0.42, 0.48 }
+
+return colors

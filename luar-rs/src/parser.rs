@@ -238,6 +238,31 @@ impl Parser {
 
     fn parse_local(&mut self) -> Result<Stmt, ParseError> {
         self.eat(&TokenKind::Local)?;
+        // Lua-compatible named local function declaration.  Represent it as a
+        // local binding whose value is a function expression so every later
+        // compiler pass retains ordinary lexical-binding semantics.
+        if self.match_tok(&TokenKind::Function) {
+            let name = self.eat_ident()?;
+            self.eat(&TokenKind::LParen)?;
+            let params = self.parse_params()?;
+            self.eat(&TokenKind::RParen)?;
+            let return_type = if self.match_tok(&TokenKind::Colon) {
+                Some(self.parse_type_expr()?)
+            } else {
+                None
+            };
+            let body = self.parse_block(&[TokenKind::End])?;
+            self.eat(&TokenKind::End)?;
+            return Ok(Stmt::Local {
+                names: vec![name],
+                types: vec![None],
+                values: vec![Expr::Function {
+                    params,
+                    return_type,
+                    body,
+                }],
+            });
+        }
         let mut names = vec![self.eat_ident()?];
         let mut types = vec![self.try_parse_type_annotation()?];
         while self.match_tok(&TokenKind::Comma) {

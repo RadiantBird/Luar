@@ -1,0 +1,5 @@
+declare background: table
+declare player: table
+declare star: table
+declare text: table
+declare game_over: table

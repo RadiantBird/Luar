@@ -62,11 +62,22 @@ impl Resolver {
     fn visit_stmt(&mut self, stmt: &mut Stmt, top_level: bool) {
         match stmt {
             Stmt::Local { names, values, .. } => {
+                // `local function f() ... end` is represented as a local
+                // function value.  Declare it before visiting its body so the
+                // conventional recursive form resolves as a local binding.
+                let local_function = names.len() == 1
+                    && values.len() == 1
+                    && matches!(values.first(), Some(Expr::Function { .. }));
+                if local_function {
+                    self.declare(&names[0], false);
+                }
                 for value in values {
                     self.visit_expr(value);
                 }
-                for name in names {
-                    self.declare(name, false);
+                if !local_function {
+                    for name in names {
+                        self.declare(name, false);
+                    }
                 }
             }
             Stmt::Const { names, values, .. } => {

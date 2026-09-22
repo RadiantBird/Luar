@@ -1,0 +1,123 @@
+-- Star Catcher: a no-asset LÖVE playground for Luar.
+-- Build with the lua54 target; LÖVE receives the generated main.lua.
+
+import type colors
+local colors = !include("./colors.luar")
+
+local WIDTH = 800
+local HEIGHT = 480
+local PLAYER_WIDTH = 96
+local PLAYER_HEIGHT = 22
+local PLAYER_SPEED = 420
+local STAR_RADIUS = 10
+
+local player = { x = WIDTH / 2 - PLAYER_WIDTH / 2, y = HEIGHT - 52 }
+local stars = {}
+local score = 0
+local lives = 3
+local spawn_timer = 0
+local game_over = false
+
+local function use_color(color)
+    love.graphics.setColor(color[1], color[2], color[3])
+end
+
+local function spawn_star()
+    local star = {
+        x = math.random(STAR_RADIUS, WIDTH - STAR_RADIUS),
+        y = -STAR_RADIUS,
+        speed = math.random(120, 250),
+    }
+    stars[#stars + 1] = star
+end
+
+local function overlaps_player(star)
+    return star.x + STAR_RADIUS > player.x
+        and star.x - STAR_RADIUS < player.x + PLAYER_WIDTH
+        and star.y + STAR_RADIUS > player.y
+        and star.y - STAR_RADIUS < player.y + PLAYER_HEIGHT
+end
+
+local function restart()
+    player.x = WIDTH / 2 - PLAYER_WIDTH / 2
+    stars = {}
+    score = 0
+    lives = 3
+    spawn_timer = 0
+    game_over = false
+end
+
+function love.load()
+    love.window.setMode(WIDTH, HEIGHT)
+    love.window.setTitle("Luar + LÖVE: Star Catcher")
+    love.graphics.setBackgroundColor(
+        colors.background[1],
+        colors.background[2],
+        colors.background[3]
+    )
+    math.randomseed(os.time())
+end
+
+function love.keypressed(key)
+    if game_over and key == "return" then
+        restart()
+    end
+end
+
+function love.update(dt)
+    if game_over then
+        return
+    end
+
+    local direction = 0
+    if love.keyboard.isDown("left", "a") then
+        direction = direction - 1
+    end
+    if love.keyboard.isDown("right", "d") then
+        direction = direction + 1
+    end
+    player.x = math.max(0, math.min(WIDTH - PLAYER_WIDTH, player.x + direction * PLAYER_SPEED * dt))
+
+    spawn_timer = spawn_timer - dt
+    if spawn_timer <= 0 then
+        spawn_star()
+        spawn_timer = math.max(0.22, 0.80 - score * 0.015)
+    end
+
+    for index = #stars, 1, -1 do
+        local star = stars[index]
+        star.y = star.y + star.speed * dt
+
+        if overlaps_player(star) then
+            score = score + 1
+            table.remove(stars, index)
+        elseif star.y - STAR_RADIUS > HEIGHT then
+            lives = lives - 1
+            table.remove(stars, index)
+            if lives == 0 then
+                game_over = true
+            end
+        end
+    end
+end
+
+function love.draw()
+    use_color(colors.player)
+    love.graphics.rectangle("fill", player.x, player.y, PLAYER_WIDTH, PLAYER_HEIGHT, 8, 8)
+
+    use_color(colors.star)
+    for _, star in ipairs(stars) do
+        love.graphics.circle("fill", star.x, star.y, STAR_RADIUS)
+    end
+
+    use_color(colors.text)
+    love.graphics.print(`Score: {score}    Lives: {lives}`, 18, 16)
+    love.graphics.print("Move: Left/Right or A/D", 18, 42)
+
+    if game_over then
+        use_color(colors.game_over)
+        love.graphics.printf("GAME OVER", 0, HEIGHT / 2 - 30, WIDTH, "center")
+        use_color(colors.text)
+        love.graphics.printf("Press Enter to play again", 0, HEIGHT / 2 + 8, WIDTH, "center")
+    end
+end

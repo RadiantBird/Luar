@@ -594,6 +594,20 @@ impl Codegen {
     }
 
     fn emit_local(&mut self, names: &[String], values: &[Expr]) {
+        if names.len() == 1
+            && values.len() == 1
+            && let Expr::Function { params, body, .. } = &values[0]
+        {
+            let parameters = Self::emit_params_vec(params);
+            self.line(&format!("local function {}({parameters})", names[0]));
+            self.indented(|this| {
+                this.push_scope();
+                this.emit_function_body(body);
+                this.pop_scope();
+            });
+            self.line("end");
+            return;
+        }
         let ns = names.join(", ");
         if values.is_empty() {
             self.line(&format!("local {ns}"));

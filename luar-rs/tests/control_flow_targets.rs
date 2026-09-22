@@ -102,6 +102,17 @@ fn interpolation_is_target_specific_and_default_remains_luau() {
 }
 
 #[test]
+fn lua_compatible_local_function_is_a_recursive_local_binding() {
+    let output = compile_source_with_options(
+        "local function countdown(value)\nif value > 0 then\ncountdown(value - 1)\nend\nend",
+        &options(Target::Lua54),
+    )
+    .unwrap();
+    assert!(output.contains("local function countdown(value)"));
+    assert!(output.contains("countdown(value - 1)"));
+}
+
+#[test]
 fn dump_ir_and_json_diagnostic_schema_are_available() {
     let ir = dump_ir("local value = 1\nreturn value", &options(Target::Luau)).unwrap();
     assert!(ir.contains("function <chunk>"));
