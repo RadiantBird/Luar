@@ -70,8 +70,16 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
   };
 });
 
-documents.onDidChangeContent(({ document }) => { updateIndex(document); scheduleValidation(document); });
-documents.onDidOpen(({ document }) => { updateIndex(document); scheduleValidation(document); });
+documents.onDidChangeContent(({ document }) => {
+  updateIndex(document);
+  scheduleValidation(document);
+  if (document.uri.toLowerCase().endsWith(".luard")) refreshOpenImporters();
+});
+documents.onDidOpen(({ document }) => {
+  updateIndex(document);
+  scheduleValidation(document);
+  if (document.uri.toLowerCase().endsWith(".luard")) refreshOpenImporters();
+});
 documents.onDidClose(({ document }) => {
   indexes.delete(document.uri);
   moduleDiagnostics.delete(document.uri);
@@ -84,6 +92,13 @@ connection.onDidChangeConfiguration((params: DidChangeConfigurationParams) => {
   settings = parseSettings((params.settings as { luar?: unknown } | undefined)?.luar ?? params.settings);
   compilerMissingWasReported = false;
   for (const document of documents.all()) scheduleValidation(document);
+});
+
+connection.onDidChangeWatchedFiles(() => {
+  // Covers a .luard file created, changed, or removed outside the editor.
+  // Re-indexing all open Luar documents is inexpensive and avoids stale
+  // diagnostics or completion after an ambient declaration changes.
+  refreshOpenImporters();
 });
 
 connection.onCompletion((params: CompletionParams): CompletionItem[] => {
@@ -158,6 +173,14 @@ function getIndex(document: TextDocument): DocumentIndex {
   const created = indexDocument(normalizeIncludeMacros(document.getText()));
   indexes.set(document.uri, created);
   return created;
+}
+
+function refreshOpenImporters(): void {
+  for (const document of documents.all()) {
+    if (document.uri.toLowerCase().endsWith(".luard")) continue;
+    updateIndex(document);
+    scheduleValidation(document);
+  }
 }
 
 function resolveModules(document: TextDocument): { definitions: NonNullable<ReturnType<typeof loadModuleDefinition>["definition"]>[]; diagnostics: Diagnostic[] } {

@@ -11,6 +11,8 @@ let client: LanguageClient;
 
 export function activate(context: ExtensionContext) {
   const serverModule = context.asAbsolutePath(path.join("out", "server.js"));
+  const definitionFiles = workspace.createFileSystemWatcher("**/*.luard");
+  context.subscriptions.push(definitionFiles);
 
   const serverOptions: ServerOptions = {
     run:   { module: serverModule, transport: TransportKind.ipc },
@@ -20,7 +22,12 @@ export function activate(context: ExtensionContext) {
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ scheme: "file", language: "luar" }],
     initializationOptions: compilerSettings(),
-    synchronize: { configurationSection: "luar" },
+    synchronize: {
+      configurationSection: "luar",
+      // A declaration file affects every open importer, including importers
+      // which have not themselves been edited since the definition changed.
+      fileEvents: definitionFiles,
+    },
   };
 
   client = new LanguageClient("luar", "Luar Language Server", serverOptions, clientOptions);
