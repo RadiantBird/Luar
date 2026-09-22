@@ -16,8 +16,64 @@ Get-Command luar -All
 
 `luar-rs\target\release`はビルド成果物であり、PATHへ登録しない。PATHにはCargoの`bin`ディレクトリだけを登録して、常に更新スクリプトが置き換える実行ファイルを使用する。
 
+VS Code拡張はPATH上の`luar`へ未保存の本文を渡し、Rustコンパイラと同じ診断を表示する。別の実行ファイルを使う場合は`luar.compiler.path`、互換性検査の対象は`luar.target`（`luau`または`lua54`）で設定する。コンパイラが見つからない場合もハイライトと補完は利用できるが、意味診断は無効になる。
+
 ## 概要
 Luau言語から派生し、ついにオブジェクト指向・テーブルのディープコピーを実現。
+
+## コンパイルターゲット
+
+LuarはLuauとLua 5.4へ出力できる。既定ターゲットは後方互換のため`luau`であり、出力ファイルの拡張子からターゲットを推測しない。
+
+```powershell
+luar compile --target luau main.luar main.luau
+luar compile --target lua54 main.luar main.lua
+luar check --target lua54 main.luar
+luar dump-ir main.luar
+```
+
+コンパイラは制御構造をLuar独自の制御フローIR（CFIR）へ変換してから、対象言語のソースへ再構成する。`dump-ir`はこの中間表現を調査する開発用コマンドであり、その表示形式は安定した公開APIではない。
+
+`luar-rs`が唯一の正式なコンパイラ実装である。`luar/`以下のTypeScript frontendはVS Codeの寛容な編集中インデックスと互換テストのために残されているが、CLIおよびcodegenとしては非推奨である。
+
+## gotoとcontinue
+
+LuarではLua互換のlabelと`goto`を使用できる。
+
+```lua
+function main()
+    for i = 1, 10 do
+        for j = 1, 10 do
+            if i == 1 and j == 3 then
+                goto exit
+            end
+            print(i, j)
+        end
+    end
+    print("end for loop")
+    ::exit::
+    print("exit")
+end
+```
+
+- labelは同じ関数またはchunk内の可視なblockに存在しなければならない。
+- 同じscopeの重複label、未定義label、ローカル変数のscope内へ飛び込む`goto`はコンパイルエラーになる。
+- `break`と`continue`はloop内でのみ使用できる。
+- Lua 5.4出力ではnative `goto`を利用する。Luau出力では可能な限り構造化し、一般的な`goto`が残る領域だけをdispatcherへ変換する。
+
+現時点のLuau dispatcherは、関数またはchunk直下に置くlabelを対象にしている。上のようにloop内から直下のlabelへ抜ける形式は利用できる。一方、入れ子block内のlabelと、直下のlocal宣言をまたいで状態を保持するlabelは、意味を近似しないため診断する。Lua 5.4ではnative `goto`を生成するが、Luar frontend側の入れ子labelの解析は次のCFIR拡張で扱う。
+
+## フォーマット文字列
+
+バッククォート文字列は、埋め込み式をそれぞれ一度だけソース順に評価し、`tostring`相当で文字列化して結合する。
+
+```lua
+local name = "Luar"
+local version = 1
+print(`Hello {name} {version}`)
+```
+
+Luauではnativeなバッククォート文字列として、Lua 5.4では意味が等価な生成コードとして出力される。literalなbraceとバッククォートは`\{`、`\}`、``\` ``でescapeする。
 
 ## const
 Luau 0.731と同じconst宣言を使用できる。
@@ -362,7 +418,9 @@ mod.run()
 print(mod.hogehoge)
 ```
 
-`!include`は`local`または`const`の単一行宣言でのみ使用できる。パスはinclude元からの相対`.luar`パスであり、循環include、ファイル欠落、末尾の`return <identifier>`不在はコンパイルエラーになる。
+`!include`は`local`または`const`の単一行宣言でのみ使用できる。パスはinclude元からの相対`.luar`または`.lua`パスであり、循環include、ファイル欠落、末尾の`return <identifier>`不在はコンパイルエラーになる。
+
+`.lua`はLua 5.4 parserで構文を検証してから、Lua 5.4 targetでは元の本文を保持してinline展開する。Lua 5.4の`<close>`や整数・ビット演算など、Luauで意味を保持できない機能をLuauへ出力しようとした場合は、近似変換せず互換性エラーにする。対象runtimeの標準ライブラリ差まではLuarが補完しない。
 
 ### 定義ファイル
 `import type qaz`と書いた`.luar`ファイルと同じディレクトリに、`qaz.luard`を配置する。
@@ -489,9 +547,11 @@ declare bar: number
   ```
 
 ## 処理フロー
-`ソース-[Luarコンパイラ]->Luauソース-[Luauコンパイラ]->Luauバイトコード->LuauVM実行`
-もしくは、Lua変換(試験的):
-`ソース-[Luarコンパイラ]->Luaソース-[Luaコンパイラ(インタプリタ?)]->LuaVM実行`
+`Luar/Luaソース-[frontend]->HIR-[制御フローlowering]->CFIR-[Luau backend]->Luauソース->LuauVM`
+
+または:
+
+`Luar/Luaソース-[frontend]->HIR-[制御フローlowering]->CFIR-[Lua 5.4 backend]->Luaソース->Lua 5.4 VM`
 ### あとがき
 mixinも追加予定(今回は実装しない)
 mixinってなんですか？多分不要では

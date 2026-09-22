@@ -11,7 +11,8 @@ pub enum Expr {
     True,
     False,
     Number(String),
-    Str(String), // includes template strings
+    Str(String),
+    InterpolatedString(Vec<InterpolatedPart>),
     Vararg,
     Ident(String),
     SelfExpr,
@@ -48,6 +49,12 @@ pub enum Expr {
         return_type: Option<TypeExpr>,
         body: Vec<Stmt>,
     },
+}
+
+#[derive(Debug, Clone)]
+pub enum InterpolatedPart {
+    Literal(String),
+    Expr(Expr),
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +123,16 @@ pub enum Stmt {
     Return(Vec<Expr>),
     Break,
     Continue,
+    Goto {
+        label: String,
+        line: usize,
+    },
+    Label {
+        name: String,
+        line: usize,
+    },
+    /// Lua 5.4 source validated by full_moon and preserved for the Lua backend.
+    RawLua54(String),
     ExprStmt(Expr),
     ClassDecl(ClassDecl),
     ImportDecl {

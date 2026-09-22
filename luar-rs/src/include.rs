@@ -1,3 +1,4 @@
+use crate::Target;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -7,7 +8,11 @@ use std::path::{Path, PathBuf};
 /// `return identifier`; that return is removed and the module body is pasted at
 /// the declaration site.  This keeps the generated Luau independent of a
 /// runtime `require` implementation.
-pub fn expand_source(source: &str, source_path: Option<&Path>) -> Result<String, String> {
+pub fn expand_source(
+    source: &str,
+    source_path: Option<&Path>,
+    target: Target,
+) -> Result<String, String> {
     let Some(source_path) = source_path else {
         if find_include_declaration(source).is_some() {
             return Err(
@@ -21,10 +26,15 @@ pub fn expand_source(source: &str, source_path: Option<&Path>) -> Result<String,
     }
 
     let mut stack = Vec::new();
-    expand_with_path(source, source_path, &mut stack)
+    expand_with_path(source, source_path, target, &mut stack)
 }
 
-fn expand_with_path(source: &str, source_path: &Path, stack: &mut Vec<PathBuf>) -> Result<String, String> {
+fn expand_with_path(
+    source: &str,
+    source_path: &Path,
+    target: Target,
+    stack: &mut Vec<PathBuf>,
+) -> Result<String, String> {
     let directory = source_path.parent().unwrap_or_else(|| Path::new(""));
     let mut output: Vec<String> = Vec::new();
 
@@ -35,7 +45,10 @@ fn expand_with_path(source: &str, source_path: &Path, stack: &mut Vec<PathBuf>) 
             continue;
         };
 
-        let requested = declaration.path.strip_prefix('@').unwrap_or(&declaration.path);
+        let requested = declaration
+            .path
+            .strip_prefix('@')
+            .unwrap_or(&declaration.path);
         if Path::new(requested).is_absolute() {
             return Err(error_at(
                 source_path,
@@ -44,11 +57,14 @@ fn expand_with_path(source: &str, source_path: &Path, stack: &mut Vec<PathBuf>) 
             ));
         }
         let include_path = directory.join(requested);
-        if include_path.extension().and_then(|extension| extension.to_str()) != Some("luar") {
+        let extension = include_path
+            .extension()
+            .and_then(|extension| extension.to_str());
+        if !matches!(extension, Some("luar" | "lua")) {
             return Err(error_at(
                 source_path,
                 line_number,
-                "!include only accepts .luar source files",
+                "!include only accepts .luar or .lua source files",
             ));
         }
 
@@ -56,7 +72,10 @@ fn expand_with_path(source: &str, source_path: &Path, stack: &mut Vec<PathBuf>) 
             error_at(
                 source_path,
                 line_number,
-                &format!("cannot read included source '{}': {error}", include_path.display()),
+                &format!(
+                    "cannot read included source '{}': {error}",
+                    include_path.display()
+                ),
             )
         })?;
         if stack.contains(&canonical_path) {
@@ -77,17 +96,45 @@ fn expand_with_path(source: &str, source_path: &Path, stack: &mut Vec<PathBuf>) 
             error_at(
                 source_path,
                 line_number,
-                &format!("included source '{}' is not valid UTF-8: {error}", canonical_path.display()),
+                &format!(
+                    "included source '{}' is not valid UTF-8: {error}",
+                    canonical_path.display()
+                ),
             )
         })?;
-        let (module_body, returned_name) = remove_terminal_return(&included_source, &canonical_path)?;
+        if extension == Some("lua") {
+            full_moon::parse(&included_source).map_err(|errors| {
+                error_at(
+                    source_path,
+                    line_number,
+                    &format!(
+                        "invalid Lua 5.4 included source '{}': {}",
+                        canonical_path.display(),
+                        errors
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ),
+                )
+            })?;
+        }
+        let (module_body, returned_name) =
+            remove_terminal_return(&included_source, &canonical_path)?;
 
         stack.push(canonical_path.clone());
-        let expanded_body = expand_with_path(&module_body, &canonical_path, stack);
+        let expanded_body = expand_with_path(&module_body, &canonical_path, target, stack);
         stack.pop();
         let expanded_body = expanded_body?;
 
-        output.push(expanded_body);
+        if extension == Some("lua") && target == Target::Lua54 {
+            output.push(raw_lua_marker(&expanded_body));
+        } else {
+            if extension == Some("lua") {
+                reject_luau_incompatible_lua(&expanded_body, source_path, line_number)?;
+            }
+            output.push(expanded_body);
+        }
         if returned_name != declaration.name {
             output.push(format!(
                 "{} {} = {}",
@@ -99,6 +146,41 @@ fn expand_with_path(source: &str, source_path: &Path, stack: &mut Vec<PathBuf>) 
     Ok(output.join("\n"))
 }
 
+fn raw_lua_marker(source: &str) -> String {
+    let mut equals = String::new();
+    while source.contains(&format!("]{equals}]")) {
+        equals.push('=');
+    }
+    format!("__luar_raw_lua54 [{equals}[{source}]{equals}]")
+}
+
+fn reject_luau_incompatible_lua(
+    source: &str,
+    source_path: &Path,
+    line: usize,
+) -> Result<(), String> {
+    if source.contains("<close>") || source.contains("<const>") {
+        return Err(error_at(
+            source_path,
+            line,
+            "Lua 5.4 local attributes <close>/<const> cannot be represented by the Luau target",
+        ));
+    }
+    if source.contains(" << ")
+        || source.contains(" >> ")
+        || source.contains(" & ")
+        || source.contains(" | ")
+        || source.contains(" ~ ")
+    {
+        return Err(error_at(
+            source_path,
+            line,
+            "Lua 5.4 bitwise operators are not supported by the Luau target",
+        ));
+    }
+    Ok(())
+}
+
 struct IncludeDeclaration<'a> {
     binding: &'a str,
     name: &'a str,
@@ -106,7 +188,9 @@ struct IncludeDeclaration<'a> {
 }
 
 fn find_include_declaration(source: &str) -> Option<()> {
-    source.lines().find_map(|line| parse_include_declaration(line).map(|_| ()))
+    source
+        .lines()
+        .find_map(|line| parse_include_declaration(line).map(|_| ()))
 }
 
 fn parse_include_declaration(line: &str) -> Option<IncludeDeclaration<'_>> {

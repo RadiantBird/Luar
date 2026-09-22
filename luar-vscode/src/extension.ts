@@ -1,5 +1,5 @@
 import * as path from "path";
-import { ExtensionContext } from "vscode";
+import { ExtensionContext, workspace } from "vscode";
 import {
   LanguageClient,
   LanguageClientOptions,
@@ -19,10 +19,20 @@ export function activate(context: ExtensionContext) {
 
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ scheme: "file", language: "luar" }],
+    initializationOptions: compilerSettings(),
+    synchronize: { configurationSection: "luar" },
   };
 
   client = new LanguageClient("luar", "Luar Language Server", serverOptions, clientOptions);
   client.start();
+}
+
+function compilerSettings() {
+  const configuration = workspace.getConfiguration("luar");
+  return {
+    compilerPath: configuration.get<string>("compiler.path", "luar"),
+    target: configuration.get<"luau" | "lua54">("target", "luau"),
+  };
 }
 
 export function deactivate(): Thenable<void> | undefined {

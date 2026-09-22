@@ -243,6 +243,8 @@ export class Codegen {
       case "Return":       return this.emitReturn(stmt);
       case "Break":        this.line("break"); return;
       case "Continue":     this.line("continue"); return;
+      case "Goto":         this.line(`goto ${stmt.label}`); return;
+      case "Label":        this.line(`::${stmt.name}::`); return;
       case "ExprStmt":     this.line(this.emitExpr(stmt.expr)); return;
       case "ImportDecl":   return; // preambleで処理済み。Luauランタイムへの実際のrequireは生成しない
       case "DeclareStmt":  return; // 型宣言のみ。コード生成なし

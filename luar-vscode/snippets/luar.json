@@ -157,5 +157,19 @@
     "body": [
       "local ${1:name} = ${0}"
     ]
+  },
+  "Goto Label": {
+    "prefix": "label",
+    "description": "A goto target label",
+    "body": [
+      "::${1:name}::"
+    ]
+  },
+  "Goto": {
+    "prefix": "goto",
+    "description": "Jump to a visible label",
+    "body": [
+      "goto ${1:name}"
+    ]
   }
 }

@@ -7,7 +7,7 @@ export type TokenKind =
   | "function" | "end" | "local" | "return" | "self"
   | "if" | "then" | "else" | "elseif"
   | "while" | "for" | "do" | "repeat" | "until" | "in"
-  | "break" | "continue"
+  | "break" | "continue" | "goto"
   | "and" | "or" | "not"
   | "true" | "false" | "nil"
   // Literals
@@ -42,7 +42,7 @@ export const KEYWORDS: ReadonlySet<TokenKind> = new Set<TokenKind>([
   "function", "end", "local", "return", "self",
   "if", "then", "else", "elseif",
   "while", "for", "do", "repeat", "until", "in",
-  "break", "continue",
+  "break", "continue", "goto",
   "and", "or", "not",
   "true", "false", "nil",
 ]);

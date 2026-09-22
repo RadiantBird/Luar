@@ -111,6 +111,17 @@ impl Parser {
                 self.advance();
                 Ok(Stmt::Continue)
             }
+            TokenKind::Goto => {
+                let line = self.advance().line;
+                let label = self.eat_ident()?;
+                Ok(Stmt::Goto { label, line })
+            }
+            TokenKind::DoubleColon => {
+                let line = self.advance().line;
+                let name = self.eat_ident()?;
+                self.eat(&TokenKind::DoubleColon)?;
+                Ok(Stmt::Label { name, line })
+            }
             TokenKind::Import => self.parse_import(),
             TokenKind::Declare => self.parse_declare(),
             _ => self.parse_expr_or_assign(),
@@ -836,6 +847,10 @@ impl Parser {
                 let v = self.advance().value.clone();
                 Ok(Expr::Str(v))
             }
+            TokenKind::TemplateString => {
+                let token = self.advance().clone();
+                self.parse_interpolated_string(&token.value, token.line)
+            }
             TokenKind::DotDotDot => {
                 self.advance();
                 Ok(Expr::Vararg)
@@ -898,6 +913,85 @@ impl Parser {
         }
         self.eat(&TokenKind::RBrace)?;
         Ok(Expr::Table(fields))
+    }
+
+    fn parse_interpolated_string(&self, source: &str, line: usize) -> Result<Expr, ParseError> {
+        let mut parts = Vec::new();
+        let chars = source.chars().collect::<Vec<_>>();
+        let mut literal = String::new();
+        let mut index = 0;
+        while index < chars.len() {
+            match chars[index] {
+                '\\' if index + 1 < chars.len()
+                    && matches!(chars[index + 1], '{' | '}' | '`' | '\\') =>
+                {
+                    literal.push(chars[index + 1]);
+                    index += 2;
+                }
+                '{' => {
+                    if !literal.is_empty() {
+                        parts.push(InterpolatedPart::Literal(std::mem::take(&mut literal)));
+                    }
+                    let start = index + 1;
+                    let mut depth = 1usize;
+                    let mut quote = None;
+                    let mut escaped = false;
+                    index += 1;
+                    while index < chars.len() && depth > 0 {
+                        let character = chars[index];
+                        if escaped {
+                            escaped = false;
+                        } else if character == '\\' && quote.is_some() {
+                            escaped = true;
+                        } else if let Some(current_quote) = quote {
+                            if character == current_quote {
+                                quote = None;
+                            }
+                        } else {
+                            match character {
+                                '\'' | '"' | '`' => quote = Some(character),
+                                '(' | '[' | '{' => depth += 1,
+                                ')' | ']' | '}' => depth -= 1,
+                                _ => {}
+                            }
+                        }
+                        index += 1;
+                    }
+                    if depth != 0 {
+                        return Err(ParseError(format!(
+                            "[{line}] unterminated expression in interpolated string"
+                        )));
+                    }
+                    let expression = chars[start..index - 1].iter().collect::<String>();
+                    if expression.trim().is_empty() {
+                        return Err(ParseError(format!(
+                            "[{line}] empty expression in interpolated string"
+                        )));
+                    }
+                    let mut parser = Parser::new(&expression)?;
+                    let expression = parser.parse_expr()?;
+                    if !parser.is_at_end() {
+                        return Err(ParseError(format!(
+                            "[{line}] invalid expression in interpolated string"
+                        )));
+                    }
+                    parts.push(InterpolatedPart::Expr(expression));
+                }
+                '}' => {
+                    return Err(ParseError(format!(
+                        "[{line}] unmatched '}}' in interpolated string"
+                    )));
+                }
+                character => {
+                    literal.push(character);
+                    index += 1;
+                }
+            }
+        }
+        if !literal.is_empty() {
+            parts.push(InterpolatedPart::Literal(literal));
+        }
+        Ok(Expr::InterpolatedString(parts))
     }
 
     fn parse_table_field(&mut self) -> Result<TableField, ParseError> {

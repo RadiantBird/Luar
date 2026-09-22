@@ -184,7 +184,8 @@ end
 fn definition_and_import_failures_include_actionable_diagnostics() {
     let project = TempProject::new();
 
-    let missing = compile_at("import type missing\nprint(value)", &project.source_path()).unwrap_err();
+    let missing =
+        compile_at("import type missing\nprint(value)", &project.source_path()).unwrap_err();
     assert_error(&missing, "cannot read module definition");
     assert_error(&missing, "missing.luard");
 
@@ -261,10 +262,14 @@ fn malformed_definition_function_types_include_path_and_line() {
     project.definition("bad_arrow", "declare run: string -> ()");
     let invalid_arrow = compile_at("import type bad_arrow", &project.source_path()).unwrap_err();
     assert_error(&invalid_arrow, "bad_arrow.luard:1");
-    assert_error(&invalid_arrow, "function type parameters must be enclosed in parentheses");
+    assert_error(
+        &invalid_arrow,
+        "function type parameters must be enclosed in parentheses",
+    );
 
     project.definition("missing_return", "declare run: () ->");
-    let missing_return = compile_at("import type missing_return", &project.source_path()).unwrap_err();
+    let missing_return =
+        compile_at("import type missing_return", &project.source_path()).unwrap_err();
     assert_error(&missing_return, "missing_return.luard:1");
     assert_error(&missing_return, "expected identifier");
 }
@@ -466,7 +471,10 @@ print(mod.hogehoge)"#,
 #[test]
 fn include_creates_an_alias_when_the_returned_name_differs() {
     let project = TempProject::new();
-    project.source("implementation.luar", "local implementation = {}\nreturn implementation\n");
+    project.source(
+        "implementation.luar",
+        "local implementation = {}\nreturn implementation\n",
+    );
 
     let output = compile_at(
         "const api = !include(\"./implementation.luar\")",
@@ -486,20 +494,27 @@ fn include_reports_missing_extension_cycle_and_terminal_return_errors() {
     assert_error(&missing, "main.luar:1");
     assert_error(&missing, "cannot read included source");
 
-    let extension = compile_at("local mod = !include(\"./mod.lua\")", &main).unwrap_err();
-    assert_error(&extension, "main.luar:1");
-    assert_error(&extension, "only accepts .luar");
+    let lua_missing = compile_at("local mod = !include(\"./mod.lua\")", &main).unwrap_err();
+    assert_error(&lua_missing, "main.luar:1");
+    assert_error(&lua_missing, "cannot read included source");
 
-    let quoted = compile_at("local mod = !include('./mod.lua')", &main).unwrap_err();
-    assert_error(&quoted, "only accepts .luar");
+    let quoted_lua_missing = compile_at("local mod = !include('./mod.lua')", &main).unwrap_err();
+    assert_error(&quoted_lua_missing, "cannot read included source");
 
     project.source("without_return.luar", "local mod = {}\n");
-    let no_return = compile_at("local mod = !include(\"./without_return.luar\")", &main).unwrap_err();
+    let no_return =
+        compile_at("local mod = !include(\"./without_return.luar\")", &main).unwrap_err();
     assert_error(&no_return, "without_return.luar:1");
     assert_error(&no_return, "must end with standalone");
 
-    project.source("first.luar", "local first = !include(\"./second.luar\")\nreturn first\n");
-    project.source("second.luar", "local second = !include(\"./first.luar\")\nreturn second\n");
+    project.source(
+        "first.luar",
+        "local first = !include(\"./second.luar\")\nreturn first\n",
+    );
+    project.source(
+        "second.luar",
+        "local second = !include(\"./first.luar\")\nreturn second\n",
+    );
     let cycle = compile_at("local first = !include(\"./first.luar\")", &main).unwrap_err();
     assert_error(&cycle, "!include cycle detected");
 }

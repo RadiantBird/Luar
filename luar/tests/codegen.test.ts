@@ -14,6 +14,10 @@ function hasLine(src: string, expected: string) {
 }
 
 describe("Codegen: Lua関数宣言", () => {
+  it("gotoとlabelを保持する", () => {
+    expect(gen("goto exit\n::exit::")).toBe("goto exit\n::exit::");
+  });
+
   it("dotted function declarations are emitted unchanged", () => {
     const output = gen(`
 local mod = {}

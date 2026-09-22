@@ -160,7 +160,11 @@ impl Resolver {
             Stmt::ImportDecl { .. } => {}
             Stmt::DeclareStmt { .. } => self
                 .error("'declare' is only allowed in .luard module definition files".to_string()),
-            Stmt::Break | Stmt::Continue => {}
+            Stmt::Break
+            | Stmt::Continue
+            | Stmt::Goto { .. }
+            | Stmt::Label { .. }
+            | Stmt::RawLua54(_) => {}
         }
     }
 
@@ -276,6 +280,13 @@ impl Resolver {
                 self.declare_params(params);
                 self.visit_stmts(body, false);
                 self.pop_scope();
+            }
+            Expr::InterpolatedString(parts) => {
+                for part in parts {
+                    if let InterpolatedPart::Expr(expr) = part {
+                        self.visit_expr(expr);
+                    }
+                }
             }
             Expr::Nil
             | Expr::True

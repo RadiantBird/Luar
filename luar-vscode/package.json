@@ -19,6 +19,22 @@
   "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
+    "configuration": {
+      "title": "Luar",
+      "properties": {
+        "luar.compiler.path": {
+          "type": "string",
+          "default": "luar",
+          "description": "Path to the Rust Luar compiler used for semantic diagnostics."
+        },
+        "luar.target": {
+          "type": "string",
+          "enum": ["luau", "lua54"],
+          "default": "luau",
+          "description": "Compilation target used for target-compatibility diagnostics."
+        }
+      }
+    },
     "languages": [
       {
         "id": "luar",

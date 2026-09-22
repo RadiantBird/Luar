@@ -1,7 +1,8 @@
 {
   "name": "luar",
   "version": "0.1.0",
-  "description": "Luar to Luau transpiler",
+  "description": "Deprecated TypeScript compatibility frontend for Luar editor tooling",
+  "deprecated": "Use the Rust luar compiler from luar-rs; this package is retained only for editor compatibility tests.",
   "type": "module",
   "bin": {
     "luar": "./dist/index.js"

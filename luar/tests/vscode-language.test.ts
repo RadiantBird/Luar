@@ -2,6 +2,14 @@ import { describe, expect, it } from "vitest";
 import { indexDocument, normalizeIncludeMacros, parseModuleDefinition } from "../../luar-vscode/src/language";
 
 describe("VS Code module definitions", () => {
+  it("goto labelをアウトラインと補完へ載せる", () => {
+    const index = indexDocument("goto exit\n::exit::");
+    expect(index.keywords).toContain("goto");
+    expect(index.symbols).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "label", name: "exit", signature: "::exit::" }),
+    ]));
+  });
+
   it("normalizes declaration-form include macros for editor parsing", () => {
     expect(normalizeIncludeMacros('local mod = !include("@./mod.luar") -- module source')).toBe("local mod = {} -- module source");
     expect(normalizeIncludeMacros("const mod = !include('./mod.luar')")).toBe("const mod = {}");

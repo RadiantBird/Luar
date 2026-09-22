@@ -32,6 +32,7 @@ pub enum TokenKind {
     In,
     Break,
     Continue,
+    Goto,
     And,
     Or,
     Not,
@@ -41,6 +42,7 @@ pub enum TokenKind {
     // Literals
     Number,
     LuaString,
+    TemplateString,
     Ident,
     // Delimiters
     LParen,
@@ -53,6 +55,7 @@ pub enum TokenKind {
     Dot,
     Comma,
     Colon,
+    DoubleColon,
     Semicolon,
     Arrow,
     // Assignment & comparison
@@ -292,7 +295,14 @@ impl Lexer {
                     TokenKind::Dot
                 }
             }
-            ':' => TokenKind::Colon,
+            ':' => {
+                if self.peek() == ':' {
+                    self.advance();
+                    TokenKind::DoubleColon
+                } else {
+                    TokenKind::Colon
+                }
+            }
             '=' => {
                 if self.peek() == '=' {
                     self.advance();
@@ -372,19 +382,30 @@ impl Lexer {
 
     fn read_template_string(&mut self, line: usize) -> Result<Token, String> {
         self.advance(); // opening `
-        let mut s = String::from("`");
+        let mut s = String::new();
+        let mut escaped = false;
         loop {
             if self.pos >= self.src.len() {
                 return Err(format!("unfinished template string at line {line}"));
             }
             let c = self.advance();
-            s.push(c);
+            if escaped {
+                s.push('\\');
+                s.push(c);
+                escaped = false;
+                continue;
+            }
+            if c == '\\' {
+                escaped = true;
+                continue;
+            }
             if c == '`' {
                 break;
             }
+            s.push(c);
         }
         Ok(Token {
-            kind: TokenKind::LuaString,
+            kind: TokenKind::TemplateString,
             value: s,
             line,
         })
@@ -440,6 +461,7 @@ impl Lexer {
             "in" => TokenKind::In,
             "break" => TokenKind::Break,
             "continue" => TokenKind::Continue,
+            "goto" => TokenKind::Goto,
             "and" => TokenKind::And,
             "or" => TokenKind::Or,
             "not" => TokenKind::Not,

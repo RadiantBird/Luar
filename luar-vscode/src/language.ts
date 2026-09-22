@@ -14,7 +14,7 @@ import type {
   TypeExpr,
 } from "../../luar/src/parser/ast";
 
-export type SymbolKind = "class" | "method" | "field" | "function" | "variable" | "module";
+export type SymbolKind = "class" | "method" | "field" | "function" | "variable" | "module" | "label";
 
 export interface LanguageSymbol {
   name: string;
@@ -180,7 +180,7 @@ const KEYWORDS = [
   "class", "is", "public", "private", "static", "abstract", "override", "final", "super",
   "operator", "import", "declare", "global", "function", "end", "local", "return", "self",
   "if", "then", "else", "elseif", "while", "for", "do", "repeat", "until", "in", "break",
-  "continue", "and", "or", "not", "true", "false", "nil", "const",
+  "continue", "goto", "and", "or", "not", "true", "false", "nil", "const",
 ];
 
 export function indexDocument(source: string, moduleDefinitions: ModuleDefinition[] = []): DocumentIndex {
@@ -242,6 +242,7 @@ export function indexDocument(source: string, moduleDefinitions: ModuleDefinitio
     }
     collectFunctions(stmt, index, tokens, searchFrom);
   }
+  collectLabels(program.stmts, index);
   addModuleDefinitions(index, moduleDefinitions);
   return index;
 }
@@ -395,6 +396,12 @@ function indexTokens(index: DocumentIndex, tokens: Token[]): DocumentIndex {
     if (token.kind === "declare" && next.kind === "Ident") {
       addSymbol(index, makeSymbol(next.value, "variable", `declare ${next.value}`, next, next));
     }
+    if (token.kind === ":" && next.kind === ":" && tokens[i + 2]?.kind === "Ident" &&
+        tokens[i + 3]?.kind === ":" && tokens[i + 4]?.kind === ":") {
+      const label = tokens[i + 2]!;
+      addSymbol(index, makeSymbol(label.value, "label", `::${label.value}::`, label, label));
+      i += 4;
+    }
   }
   return index;
 }
@@ -430,6 +437,32 @@ function collectFunctions(stmt: Stmt, index: DocumentIndex, tokens: Token[], sea
       const pos = findToken(tokens, target.name, searchFrom);
       if (pos >= 0) addSymbol(index, makeSymbol(target.name, "function", functionSignature(target.name, value.params, value.returnType), tokens[pos], tokens[pos]));
     });
+  }
+}
+
+function collectLabels(stmts: Stmt[], index: DocumentIndex): void {
+  for (const stmt of stmts) {
+    if (stmt.kind === "Label") {
+      const token = { line: stmt.line, col: stmt.col + 2, value: stmt.name } as Token;
+      addSymbol(index, makeSymbol(stmt.name, "label", `::${stmt.name}::`, token, token));
+      continue;
+    }
+    if (stmt.kind === "FunctionDecl" || stmt.kind === "Do" || stmt.kind === "While" ||
+        stmt.kind === "Repeat" || stmt.kind === "NumericFor" || stmt.kind === "GenericFor") {
+      collectLabels(stmt.body, index);
+    } else if (stmt.kind === "If") {
+      for (const clause of stmt.clauses) collectLabels(clause.body, index);
+      if (stmt.elseBody) collectLabels(stmt.elseBody, index);
+    } else if (stmt.kind === "ClassDecl") {
+      const members = [...stmt.topLevelMembers, ...stmt.blocks.flatMap((block) => block.members)];
+      for (const member of members) {
+        if (member.kind === "MethodMember" && member.body) collectLabels(member.body, index);
+      }
+    } else if (stmt.kind === "Local") {
+      for (const value of stmt.values) {
+        if (value.kind === "Function") collectLabels(value.body, index);
+      }
+    }
   }
 }
 

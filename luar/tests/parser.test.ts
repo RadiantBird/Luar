@@ -21,6 +21,14 @@ describe("Parser: 型専用import", () => {
 });
 
 describe("Parser: Lua関数宣言", () => {
+  it("gotoとlabelをパースする", () => {
+    const prog = parse("goto exit\n::exit::");
+    expect(prog.stmts).toEqual([
+      { kind: "Goto", label: "exit", line: 1, col: 1 },
+      { kind: "Label", name: "exit", line: 2, col: 1 },
+    ]);
+  });
+
   it("accepts global and dotted function declarations", () => {
     const program = parse(`
 function greet(name: string)

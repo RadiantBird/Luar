@@ -81,6 +81,18 @@ export class Parser {
       case "return":  return this.parseReturn();
       case "break":   this.advance(); return { kind: "Break" };
       case "continue":this.advance(); return { kind: "Continue" };
+      case "goto": {
+        const token = this.advance();
+        return { kind: "Goto", label: this.eatIdent(), line: token.line, col: token.col };
+      }
+      case ":": {
+        const start = this.advance();
+        this.eat(":");
+        const name = this.eatIdent();
+        this.eat(":");
+        this.eat(":");
+        return { kind: "Label", name, line: start.line, col: start.col };
+      }
       case "import":  return this.parseImport();
       case "declare": return this.parseDeclare();
       default:        return this.parseExprOrAssign();

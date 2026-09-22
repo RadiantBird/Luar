@@ -16,12 +16,12 @@ import {
   Position,
   Range,
   SymbolKind as LspSymbolKind,
+  DidChangeConfigurationParams,
 } from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
-import { Parser } from "../../luar/src/parser/parser";
-import { Checker } from "../../luar/src/checker/checker";
 import {
   importsInDocument,
   indexDocument,
@@ -35,22 +35,55 @@ const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
 const indexes = new Map<string, DocumentIndex>();
 const moduleDiagnostics = new Map<string, Diagnostic[]>();
+const validationTimers = new Map<string, NodeJS.Timeout>();
+const validationProcesses = new Map<string, ChildProcessWithoutNullStreams>();
+const publishedCompilerUris = new Map<string, Set<string>>();
+const compilerDiagnosticsByOwner = new Map<string, Map<string, Diagnostic[]>>();
 
-connection.onInitialize((_params: InitializeParams): InitializeResult => ({
-  capabilities: {
-    textDocumentSync: TextDocumentSyncKind.Incremental,
-    completionProvider: { triggerCharacters: ["."] },
-    hoverProvider: true,
-    documentSymbolProvider: true,
-  },
-}));
+interface CompilerSettings {
+  compilerPath: string;
+  target: "luau" | "lua54";
+}
 
-documents.onDidChangeContent(({ document }) => { updateIndex(document); validate(document); });
-documents.onDidOpen(({ document }) => { updateIndex(document); validate(document); });
+interface CompilerDiagnostic {
+  file: string;
+  line: number;
+  column: number;
+  endLine: number;
+  endColumn: number;
+  severity: "error" | "warning";
+  message: string;
+}
+
+let settings: CompilerSettings = { compilerPath: "luar", target: "luau" };
+let compilerMissingWasReported = false;
+
+connection.onInitialize((params: InitializeParams): InitializeResult => {
+  settings = parseSettings(params.initializationOptions);
+  return {
+    capabilities: {
+      textDocumentSync: TextDocumentSyncKind.Incremental,
+      completionProvider: { triggerCharacters: ["."] },
+      hoverProvider: true,
+      documentSymbolProvider: true,
+    },
+  };
+});
+
+documents.onDidChangeContent(({ document }) => { updateIndex(document); scheduleValidation(document); });
+documents.onDidOpen(({ document }) => { updateIndex(document); scheduleValidation(document); });
 documents.onDidClose(({ document }) => {
   indexes.delete(document.uri);
   moduleDiagnostics.delete(document.uri);
+  cancelValidation(document.uri);
+  clearCompilerDiagnostics(document.uri);
   connection.sendDiagnostics({ uri: document.uri, diagnostics: [] });
+});
+
+connection.onDidChangeConfiguration((params: DidChangeConfigurationParams) => {
+  settings = parseSettings((params.settings as { luar?: unknown } | undefined)?.luar ?? params.settings);
+  compilerMissingWasReported = false;
+  for (const document of documents.all()) scheduleValidation(document);
 });
 
 connection.onCompletion((params: CompletionParams): CompletionItem[] => {
@@ -60,6 +93,13 @@ connection.onCompletion((params: CompletionParams): CompletionItem[] => {
   const before = document.getText({ start: { line: params.position.line, character: 0 }, end: params.position });
   if (/\bimport\s+[A-Za-z_0-9]*$/.test(before)) {
     return [{ label: "type", kind: CompletionItemKind.Keyword, detail: "type-only module import" }];
+  }
+  const gotoMatch = before.match(/\bgoto\s+([A-Za-z_][A-Za-z0-9_]*)?$/);
+  if (gotoMatch) {
+    const labelPrefix = gotoMatch[1] ?? "";
+    return index.symbols
+      .filter((symbol) => symbol.kind === "label" && symbol.name.startsWith(labelPrefix))
+      .map(completionFor);
   }
   const memberMatch = before.match(/([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)?$/);
   if (memberMatch) {
@@ -168,11 +208,11 @@ function errorRange(error: { line: number; col: number }, fallbackLine: number, 
   return Range.create(line, col, line, col + 1);
 }
 function completionFor(symbol: LanguageSymbol): CompletionItem {
-  const kinds: Record<LanguageSymbol["kind"], CompletionItemKind> = { class: CompletionItemKind.Class, method: CompletionItemKind.Method, field: CompletionItemKind.Field, function: CompletionItemKind.Function, variable: CompletionItemKind.Variable, module: CompletionItemKind.Module };
+  const kinds: Record<LanguageSymbol["kind"], CompletionItemKind> = { class: CompletionItemKind.Class, method: CompletionItemKind.Method, field: CompletionItemKind.Field, function: CompletionItemKind.Function, variable: CompletionItemKind.Variable, module: CompletionItemKind.Module, label: CompletionItemKind.Reference };
   return { label: symbol.name, kind: kinds[symbol.kind], detail: symbol.signature, documentation: symbol.signature };
 }
 function toDocumentSymbol(symbol: LanguageSymbol): DocumentSymbol {
-  const kind: Record<LanguageSymbol["kind"], LspSymbolKind> = { class: LspSymbolKind.Class, method: LspSymbolKind.Method, field: LspSymbolKind.Field, function: LspSymbolKind.Function, variable: LspSymbolKind.Variable, module: LspSymbolKind.Namespace };
+  const kind: Record<LanguageSymbol["kind"], LspSymbolKind> = { class: LspSymbolKind.Class, method: LspSymbolKind.Method, field: LspSymbolKind.Field, function: LspSymbolKind.Function, variable: LspSymbolKind.Variable, module: LspSymbolKind.Namespace, label: LspSymbolKind.Key };
   const range = Range.create(symbol.line, symbol.col, symbol.endLine, symbol.endCol);
   return DocumentSymbol.create(symbol.name, symbol.signature, kind[symbol.kind], range, range);
 }
@@ -185,51 +225,142 @@ function wordAt(document: TextDocument, position: Position): string | null {
   return match ? `${match[0]}${suffix}` : null;
 }
 
-function validate(document: TextDocument): void {
-  const src = normalizeIncludeMacros(document.getText());
-  const diagnostics: Diagnostic[] = [];
-
-  // .luard files are definition files, not compilable .luar programs.
+function scheduleValidation(document: TextDocument): void {
+  cancelValidation(document.uri);
   if (document.uri.toLowerCase().endsWith(".luard")) {
-    connection.sendDiagnostics({ uri: document.uri, diagnostics: [] });
+    connection.sendDiagnostics({ uri: document.uri, diagnostics: moduleDiagnostics.get(document.uri) ?? [] });
+    return;
+  }
+  const version = document.version;
+  validationTimers.set(document.uri, setTimeout(() => {
+    validationTimers.delete(document.uri);
+    runCompilerValidation(document, version);
+  }, 250));
+}
+
+function cancelValidation(uri: string): void {
+  const timer = validationTimers.get(uri);
+  if (timer) clearTimeout(timer);
+  validationTimers.delete(uri);
+  validationProcesses.get(uri)?.kill();
+  validationProcesses.delete(uri);
+}
+
+function runCompilerValidation(document: TextDocument, version: number): void {
+  let sourcePath: string;
+  try {
+    sourcePath = fileURLToPath(document.uri);
+  } catch {
     return;
   }
 
-  try {
-    const prog = new Parser(src).parse();
-    const errors = new Checker().check(prog);
+  const child = spawn(settings.compilerPath, [
+    "check", "--target", settings.target, "--stdin",
+    "--source-path", sourcePath, "--diagnostic-format", "json",
+  ], { windowsHide: true });
+  validationProcesses.set(document.uri, child);
 
-    for (const e of errors) {
-      diagnostics.push({
-        severity: DiagnosticSeverity.Error,
-        range: {
-          start: { line: e.line - 1, character: e.col - 1 },
-          end:   { line: e.line - 1, character: e.col - 1 + 1 },
-        },
-        message: e.message,
-        source: "luar",
-      });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+  child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+  child.on("error", (error: NodeJS.ErrnoException) => {
+    validationProcesses.delete(document.uri);
+    if (error.code === "ENOENT" && !compilerMissingWasReported) {
+      compilerMissingWasReported = true;
+      connection.window.showWarningMessage(
+        `Luar compiler '${settings.compilerPath}' was not found. Configure luar.compiler.path to enable semantic diagnostics.`,
+      );
+    } else if (!compilerMissingWasReported) {
+      compilerMissingWasReported = true;
+      connection.window.showErrorMessage(`Luar compiler could not start: ${error.message}`);
     }
-  } catch (e: unknown) {
-    if (e instanceof Error) {
-      const located = e as Error & { line?: number; col?: number };
-      const line = typeof located.line === "number" ? located.line - 1 : 0;
-      const col  = typeof located.col  === "number" ? located.col  - 1 : 0;
-      diagnostics.push({
-        severity: DiagnosticSeverity.Error,
-        range: {
-          start: { line, character: col },
-          end:   { line, character: col + 1 },
-        },
-        message: e.message,
-        source: "luar",
-      });
+    clearCompilerDiagnostics(document.uri);
+  });
+  child.stdin.on("error", () => {
+    // The process-level error/close handlers above own user-visible reporting.
+  });
+  child.on("close", () => {
+    if (validationProcesses.get(document.uri) !== child) return;
+    validationProcesses.delete(document.uri);
+    const current = documents.get(document.uri);
+    if (!current || current.version !== version) return;
+
+    let diagnostics: CompilerDiagnostic[];
+    try {
+      const parsed = JSON.parse(stdout) as { diagnostics?: CompilerDiagnostic[] } | CompilerDiagnostic[];
+      diagnostics = Array.isArray(parsed) ? parsed : (parsed.diagnostics ?? []);
+    } catch {
+      const message = stderr.trim() || stdout.trim() || "Luar compiler returned invalid diagnostic output";
+      diagnostics = [{
+        file: sourcePath,
+        line: 1,
+        column: 1,
+        endLine: 1,
+        endColumn: 2,
+        severity: "error",
+        message,
+      }];
     }
+    publishCompilerDiagnostics(document.uri, sourcePath, diagnostics);
+  });
+  child.stdin.end(document.getText());
+}
+
+function publishCompilerDiagnostics(ownerUri: string, sourcePath: string, diagnostics: CompilerDiagnostic[]): void {
+  const previousUris = publishedCompilerUris.get(ownerUri) ?? new Set<string>();
+  const byUri = new Map<string, Diagnostic[]>();
+  for (const diagnostic of diagnostics) {
+    const uri = pathToFileURL(diagnostic.file || sourcePath).toString();
+    const list = byUri.get(uri) ?? [];
+    list.push({
+      severity: diagnostic.severity === "warning" ? DiagnosticSeverity.Warning : DiagnosticSeverity.Error,
+      range: Range.create(
+        Math.max(0, diagnostic.line - 1), Math.max(0, diagnostic.column - 1),
+        Math.max(0, diagnostic.endLine - 1), Math.max(0, diagnostic.endColumn - 1),
+      ),
+      message: diagnostic.message,
+      source: "luar",
+    });
+    byUri.set(uri, list);
   }
 
-  diagnostics.push(...(moduleDiagnostics.get(document.uri) ?? []));
+  const uris = new Set(byUri.keys());
+  uris.add(ownerUri);
+  compilerDiagnosticsByOwner.set(ownerUri, byUri);
+  publishedCompilerUris.set(ownerUri, uris);
+  for (const uri of new Set([...previousUris, ...uris])) publishUriDiagnostics(uri);
+}
 
-  connection.sendDiagnostics({ uri: document.uri, diagnostics });
+function clearCompilerDiagnostics(ownerUri: string): void {
+  const affected = publishedCompilerUris.get(ownerUri) ?? new Set<string>();
+  compilerDiagnosticsByOwner.delete(ownerUri);
+  publishedCompilerUris.delete(ownerUri);
+  for (const uri of affected) publishUriDiagnostics(uri);
+}
+
+function publishUriDiagnostics(uri: string): void {
+  const diagnostics = [...(moduleDiagnostics.get(uri) ?? [])];
+  for (const byUri of compilerDiagnosticsByOwner.values()) {
+    diagnostics.push(...(byUri.get(uri) ?? []));
+  }
+  connection.sendDiagnostics({ uri, diagnostics });
+}
+
+function parseSettings(value: unknown): CompilerSettings {
+  const candidate = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const compilerPath = typeof candidate.compilerPath === "string"
+    ? candidate.compilerPath
+    : typeof candidate["compiler.path"] === "string"
+      ? candidate["compiler.path"] as string
+      : candidate.compiler && typeof candidate.compiler === "object" &&
+          typeof (candidate.compiler as Record<string, unknown>).path === "string"
+        ? (candidate.compiler as Record<string, unknown>).path as string
+      : "luar";
+  const target = candidate.target === "lua54" ? "lua54" : "luau";
+  return { compilerPath, target };
 }
 
 documents.listen(connection);

@@ -45,6 +45,8 @@ export type Stmt =
   | { kind: "Return"; values: Expr[] }
   | { kind: "Break" }
   | { kind: "Continue" }
+  | { kind: "Goto"; label: string; line: number; col: number }
+  | { kind: "Label"; name: string; line: number; col: number }
   | { kind: "ExprStmt"; expr: Expr }
   | FunctionDecl
   | ClassDecl

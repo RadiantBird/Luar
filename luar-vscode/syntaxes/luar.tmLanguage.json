@@ -14,6 +14,7 @@
     { "include": "#declare-decl" },
     { "include": "#function-decl" },
     { "include": "#class-decl" },
+    { "include": "#label" },
     { "include": "#keyword" },
     { "include": "#constant" }
   ],
@@ -117,9 +118,28 @@
         "2": { "name": "entity.name.type.luar" }
       }
     },
+    "label": {
+      "patterns": [
+        {
+          "match": "(::)\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(::)",
+          "captures": {
+            "1": { "name": "punctuation.definition.label.begin.luar" },
+            "2": { "name": "entity.name.label.luar" },
+            "3": { "name": "punctuation.definition.label.end.luar" }
+          }
+        },
+        {
+          "match": "\\b(goto)\\b[ \\t]+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.control.goto.luar" },
+            "2": { "name": "variable.other.label.luar" }
+          }
+        }
+      ]
+    },
     "keyword": {
       "name": "keyword.luar",
-      "match": "\\b(is|public|private|static|abstract|override|final|super|operator|end|if|then|else|elseif|while|for|do|repeat|until|in|break|continue|return|local|self|and|or|not|import|declare|global)\\b"
+      "match": "\\b(is|public|private|static|abstract|override|final|super|operator|end|if|then|else|elseif|while|for|do|repeat|until|in|break|continue|goto|return|local|self|and|or|not|import|declare|global)\\b"
     },
     "constant": {
       "name": "constant.language.luar",

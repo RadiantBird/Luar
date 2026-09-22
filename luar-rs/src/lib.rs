@@ -1,17 +1,71 @@
 pub mod ast;
 pub mod checker;
 pub mod codegen;
+pub mod control_flow;
 pub mod include;
 pub mod lexer;
 pub mod modules;
 pub mod parser;
 pub mod resolver;
 
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::path::Path;
+use std::path::PathBuf;
 use std::ptr;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Target {
+    #[default]
+    Luau,
+    Lua54,
+}
+
+impl std::str::FromStr for Target {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "luau" => Ok(Self::Luau),
+            "lua54" => Ok(Self::Lua54),
+            _ => Err(format!(
+                "unknown target '{value}'; expected 'luau' or 'lua54'"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CompileOptions {
+    pub target: Target,
+    pub source_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Diagnostic {
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+    pub severity: Severity,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiagnosticReport {
+    pub diagnostics: Vec<Diagnostic>,
+}
 
 // Thread-local error buffer for luar_get_errors
 thread_local! {
@@ -94,21 +148,155 @@ pub extern "C" fn luar_compile_with_path(
     write_output(output, out_buf, out_len)
 }
 
+/// Compile Luar source for an explicit target (`"luau"` or `"lua54"`).
+/// `source_path` may be null when the source has no imports or includes.
+/// Existing C entry points remain Luau-default compatibility wrappers.
+#[unsafe(no_mangle)]
+pub extern "C" fn luar_compile_with_target(
+    src: *const c_char,
+    source_path: *const c_char,
+    target: *const c_char,
+    out_buf: *mut c_char,
+    out_len: usize,
+) -> c_int {
+    if src.is_null() || target.is_null() || out_buf.is_null() || out_len == 0 {
+        return -1;
+    }
+    let source = unsafe {
+        match CStr::from_ptr(src).to_str() {
+            Ok(source) => source,
+            Err(_) => {
+                store_error("invalid UTF-8 in source");
+                return -1;
+            }
+        }
+    };
+    let target = unsafe {
+        match CStr::from_ptr(target)
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse().ok())
+        {
+            Some(target) => target,
+            None => {
+                store_error("invalid target; expected 'luau' or 'lua54'");
+                return -1;
+            }
+        }
+    };
+    let source_path = if source_path.is_null() {
+        None
+    } else {
+        let source_path = unsafe {
+            match CStr::from_ptr(source_path).to_str() {
+                Ok(path) => path,
+                Err(_) => {
+                    store_error("invalid UTF-8 in source path");
+                    return -1;
+                }
+            }
+        };
+        Some(PathBuf::from(source_path))
+    };
+    let options = CompileOptions {
+        target,
+        source_path,
+    };
+    let output = match compile_source_with_options(source, &options) {
+        Ok(output) => output,
+        Err(errors) => {
+            store_error(
+                &errors
+                    .iter()
+                    .map(|error| format!("[{}] {}", error.line, error.message))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+            return -1;
+        }
+    };
+    write_output(output, out_buf, out_len)
+}
+
+/// Explicit-target form without a source path.  This is useful for embedded
+/// callers that do not use imports/includes.
+#[unsafe(no_mangle)]
+pub extern "C" fn luar_compile_target(
+    src: *const c_char,
+    target: *const c_char,
+    out_buf: *mut c_char,
+    out_len: usize,
+) -> c_int {
+    luar_compile_with_target(src, ptr::null(), target, out_buf, out_len)
+}
+
+/// Explicit-target form with a required source path for module/include lookup.
+#[unsafe(no_mangle)]
+pub extern "C" fn luar_compile_with_path_target(
+    src: *const c_char,
+    source_path: *const c_char,
+    target: *const c_char,
+    out_buf: *mut c_char,
+    out_len: usize,
+) -> c_int {
+    if source_path.is_null() {
+        store_error("source path must not be null");
+        return -1;
+    }
+    luar_compile_with_target(src, source_path, target, out_buf, out_len)
+}
+
 pub fn compile_source(source: &str, source_path: Option<&Path>) -> Result<String, Vec<String>> {
-    let source = include::expand_source(source, source_path).map_err(|error| vec![error])?;
-    let mut parser = parser::Parser::new(&source).map_err(|error| vec![error.0])?;
-    let mut program = parser.parse().map_err(|error| vec![error.0])?;
+    let options = CompileOptions {
+        target: Target::Luau,
+        source_path: source_path.map(Path::to_path_buf),
+    };
+    compile_source_with_options(source, &options).map_err(|diagnostics| {
+        diagnostics
+            .into_iter()
+            .map(|diagnostic| format!("[{}] {}", diagnostic.line, diagnostic.message))
+            .collect()
+    })
+}
+
+pub fn compile_source_with_options(
+    source: &str,
+    options: &CompileOptions,
+) -> Result<String, Vec<Diagnostic>> {
+    let program = check_source_with_options(source, options)?;
+    Ok(codegen::Codegen::for_target(options.target).generate(&program))
+}
+
+pub fn check_source_with_options(
+    source: &str,
+    options: &CompileOptions,
+) -> Result<ast::Program, Vec<Diagnostic>> {
+    let file = options
+        .source_path
+        .as_deref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<stdin>".to_string());
+    let source = include::expand_source(source, options.source_path.as_deref(), options.target)
+        .map_err(|error| vec![diagnostic_from_message(&file, &error)])?;
+    let mut parser = parser::Parser::new(&source)
+        .map_err(|error| vec![diagnostic_from_message(&file, &error.0)])?;
+    let mut program = parser
+        .parse()
+        .map_err(|error| vec![diagnostic_from_message(&file, &error.0)])?;
+    convert_raw_lua_markers(&mut program.stmts);
 
     let mut imports = Vec::new();
     let mut seen_imports = std::collections::HashSet::new();
-    let mut errors = Vec::new();
+    let mut errors: Vec<Diagnostic> = Vec::new();
     for stmt in &program.stmts {
         if let ast::Stmt::ImportDecl { module_name } = stmt {
             if seen_imports.insert(module_name.clone()) {
                 imports.push(module_name.clone());
             } else {
-                errors.push(format!(
-                    "[0] module '{module_name}' is imported more than once"
+                errors.push(diagnostic(
+                    &file,
+                    1,
+                    format!("module '{module_name}' is imported more than once"),
                 ));
             }
         }
@@ -116,21 +304,27 @@ pub fn compile_source(source: &str, source_path: Option<&Path>) -> Result<String
 
     let mut definitions = Vec::new();
     if !imports.is_empty() {
-        let Some(source_path) = source_path else {
-            errors.push(
-                "[0] import declarations require luar_compile_with_path and a source file path"
+        let Some(source_path) = options.source_path.as_deref() else {
+            errors.push(diagnostic(
+                &file,
+                1,
+                "import declarations require luar_compile_with_path and a source file path"
                     .to_string(),
-            );
+            ));
             return Err(errors);
         };
         if source_path.as_os_str().is_empty() {
-            errors.push("[0] import declarations require a non-empty source file path".to_string());
+            errors.push(diagnostic(
+                &file,
+                1,
+                "import declarations require a non-empty source file path".to_string(),
+            ));
             return Err(errors);
         }
         for module_name in imports {
             match modules::load_definition(&module_name, source_path) {
                 Ok(definition) => definitions.push(definition),
-                Err(error) => errors.push(format!("[{}] {}", error.line, error.message)),
+                Err(error) => errors.push(diagnostic(&file, error.line.max(1), error.message)),
             }
         }
     }
@@ -139,19 +333,251 @@ pub fn compile_source(source: &str, source_path: Option<&Path>) -> Result<String
     errors.extend(
         resolver_errors
             .into_iter()
-            .map(|error| format!("[{}] {}", error.line, error.message)),
+            .map(|error| diagnostic(&file, error.line.max(1), error.message)),
     );
     let checker_errors = checker::Checker::new().check(&mut program);
     errors.extend(
         checker_errors
             .into_iter()
-            .map(|error| format!("[{}] {}", error.line, error.message)),
+            .map(|error| diagnostic(&file, error.line.max(1), error.message)),
     );
+    errors.extend(
+        control_flow::validate(&program)
+            .into_iter()
+            .map(|error| diagnostic(&file, error.line.max(1), error.message)),
+    );
+    if options.target == Target::Luau {
+        errors.extend(validate_luau_label_layout(&program, &file));
+    }
     if !errors.is_empty() {
         return Err(errors);
     }
 
-    Ok(codegen::Codegen::new().generate(&program))
+    Ok(program)
+}
+
+pub fn dump_ir(source: &str, options: &CompileOptions) -> Result<String, Vec<Diagnostic>> {
+    let program = check_source_with_options(source, options)?;
+    Ok(control_flow::dump(&program))
+}
+
+fn diagnostic(file: &str, line: usize, message: String) -> Diagnostic {
+    Diagnostic {
+        file: file.to_string(),
+        line: line.max(1),
+        column: 1,
+        end_line: line.max(1),
+        end_column: 1,
+        severity: Severity::Error,
+        message,
+    }
+}
+
+fn diagnostic_from_message(default_file: &str, message: &str) -> Diagnostic {
+    let mut file = default_file.to_string();
+    let mut line = 1;
+    let mut text = message.to_string();
+    if let Some(rest) = message.strip_prefix('[') {
+        if let Some((number, tail)) = rest.split_once(']') {
+            line = number.parse().unwrap_or(1).max(1);
+            text = tail.trim_start().to_string();
+        }
+    } else {
+        let parts = message.splitn(3, ':').collect::<Vec<_>>();
+        if parts.len() == 3 {
+            if let Ok(parsed) = parts[1].parse::<usize>() {
+                file = parts[0].to_string();
+                line = parsed.max(1);
+                text = parts[2].trim_start().to_string();
+            }
+        }
+    }
+    diagnostic(&file, line, text)
+}
+
+fn convert_raw_lua_markers(stmts: &mut [ast::Stmt]) {
+    use ast::{Expr, Member, Stmt};
+    for stmt in stmts {
+        let raw = match stmt {
+            Stmt::ExprStmt(Expr::Call { callee, args })
+                if matches!(callee.as_ref(), Expr::Ident(name) if name == "__luar_raw_lua54")
+                    && args.len() == 1 =>
+            {
+                match &args[0] {
+                    Expr::Str(source) => Some(source.clone()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(source) = raw {
+            *stmt = Stmt::RawLua54(source);
+            continue;
+        }
+        match stmt {
+            Stmt::FunctionDecl { body, .. }
+            | Stmt::Do { body }
+            | Stmt::While { body, .. }
+            | Stmt::Repeat { body, .. }
+            | Stmt::NumericFor { body, .. }
+            | Stmt::GenericFor { body, .. } => convert_raw_lua_markers(body),
+            Stmt::If { clauses, else_body } => {
+                for clause in clauses {
+                    convert_raw_lua_markers(&mut clause.body);
+                }
+                if let Some(body) = else_body {
+                    convert_raw_lua_markers(body);
+                }
+            }
+            Stmt::ClassDecl(class) => {
+                for member in class
+                    .top_level_members
+                    .iter_mut()
+                    .chain(class.blocks.iter_mut().flat_map(|block| &mut block.members))
+                {
+                    if let Member::Method(method) = member {
+                        if let Some(body) = &mut method.body {
+                            convert_raw_lua_markers(body);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn validate_luau_label_layout(program: &ast::Program, file: &str) -> Vec<Diagnostic> {
+    fn walk_expr(expr: &ast::Expr, file: &str, errors: &mut Vec<Diagnostic>) {
+        match expr {
+            ast::Expr::Function { body, .. } => walk(body, false, file, errors),
+            ast::Expr::InterpolatedString(parts) => {
+                for part in parts {
+                    if let ast::InterpolatedPart::Expr(expr) = part {
+                        walk_expr(expr, file, errors);
+                    }
+                }
+            }
+            ast::Expr::Field { obj, .. } | ast::Expr::Unop { expr: obj, .. } => {
+                walk_expr(obj, file, errors)
+            }
+            ast::Expr::Index { obj, key } => {
+                walk_expr(obj, file, errors);
+                walk_expr(key, file, errors);
+            }
+            ast::Expr::Call { callee, args } => {
+                walk_expr(callee, file, errors);
+                for argument in args {
+                    walk_expr(argument, file, errors);
+                }
+            }
+            ast::Expr::MethodCall { obj, args, .. } => {
+                walk_expr(obj, file, errors);
+                for argument in args {
+                    walk_expr(argument, file, errors);
+                }
+            }
+            ast::Expr::Binop { left, right, .. } => {
+                walk_expr(left, file, errors);
+                walk_expr(right, file, errors);
+            }
+            ast::Expr::Table(fields) => {
+                for field in fields {
+                    match field {
+                        ast::TableField::Index { key, value } => {
+                            walk_expr(key, file, errors);
+                            walk_expr(value, file, errors);
+                        }
+                        ast::TableField::Name { value, .. } | ast::TableField::Value(value) => {
+                            walk_expr(value, file, errors)
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn walk(body: &[ast::Stmt], nested: bool, file: &str, errors: &mut Vec<Diagnostic>) {
+        let mut saw_top_level_local = false;
+        for stmt in body {
+            match stmt {
+                ast::Stmt::Local { .. } | ast::Stmt::Const { .. } if !nested => {
+                    saw_top_level_local = true;
+                }
+                ast::Stmt::Label { line, name } if !nested && saw_top_level_local => errors.push(
+                    diagnostic(
+                        file,
+                        *line,
+                        format!(
+                            "Luau target cannot preserve local scope across label '{}' yet; move the label before top-level local declarations",
+                            name
+                        ),
+                    ),
+                ),
+                ast::Stmt::Label { line, .. } if nested => errors.push(diagnostic(
+                    file,
+                    *line,
+                    "Luau target currently requires labels to be at function/chunk top level"
+                        .to_string(),
+                )),
+                ast::Stmt::Do { body }
+                | ast::Stmt::While { body, .. }
+                | ast::Stmt::Repeat { body, .. }
+                | ast::Stmt::NumericFor { body, .. }
+                | ast::Stmt::GenericFor { body, .. } => walk(body, true, file, errors),
+                ast::Stmt::If { clauses, else_body } => {
+                    for clause in clauses {
+                        walk(&clause.body, true, file, errors);
+                    }
+                    if let Some(body) = else_body {
+                        walk(body, true, file, errors);
+                    }
+                }
+                ast::Stmt::FunctionDecl { body, .. } => walk(body, false, file, errors),
+                ast::Stmt::Local { values, .. } | ast::Stmt::Const { values, .. } => {
+                    for value in values {
+                        walk_expr(value, file, errors);
+                    }
+                }
+                ast::Stmt::Assign { targets, values } => {
+                    for expr in targets.iter().chain(values) {
+                        walk_expr(expr, file, errors);
+                    }
+                }
+                ast::Stmt::Return(values) => {
+                    for value in values {
+                        walk_expr(value, file, errors);
+                    }
+                }
+                ast::Stmt::ExprStmt(expr) => walk_expr(expr, file, errors),
+                ast::Stmt::ClassDecl(class) => {
+                    for member in class
+                        .top_level_members
+                        .iter()
+                        .chain(class.blocks.iter().flat_map(|block| &block.members))
+                    {
+                        match member {
+                            ast::Member::Field(field) => {
+                                if let Some(value) = &field.value {
+                                    walk_expr(value, file, errors);
+                                }
+                            }
+                            ast::Member::Method(method) => {
+                                if let Some(body) = &method.body {
+                                    walk(body, false, file, errors);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut errors = Vec::new();
+    walk(&program.stmts, false, file, &mut errors);
+    errors
 }
 
 fn write_output(output: String, out_buf: *mut c_char, out_len: usize) -> c_int {

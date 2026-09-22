@@ -11,6 +11,10 @@ function values(src: string): string[] {
 }
 
 describe("Lexer", () => {
+  it("gotoとlabel区切りをトークン化する", () => {
+    expect(kinds("goto exit\n::exit::")).toEqual(["goto", "Ident", ":", ":", "Ident", ":", ":", "EOF"]);
+  });
+
   it("クラス宣言の基本トークン", () => {
     expect(kinds("class Lua is")).toEqual(["class", "Ident", "is", "EOF"]);
   });

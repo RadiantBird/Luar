@@ -1,3 +1,4 @@
+use crate::Target;
 use crate::ast::*;
 use std::collections::HashMap;
 
@@ -43,16 +44,28 @@ pub struct Codegen {
     type_env: Vec<HashMap<String, String>>,
     current_class: Option<String>,
     registry: HashMap<String, ClassRegistry>,
+    target: Target,
+    next_generated_name: usize,
+    continue_wrappers: Vec<Option<String>>,
+    dispatcher: Option<(String, String)>,
 }
 
 impl Codegen {
     pub fn new() -> Self {
+        Self::for_target(Target::Luau)
+    }
+
+    pub fn for_target(target: Target) -> Self {
         Codegen {
             out: Vec::new(),
             indent: 0,
             type_env: vec![HashMap::new()],
             current_class: None,
             registry: HashMap::new(),
+            target,
+            next_generated_name: 0,
+            continue_wrappers: Vec::new(),
+            dispatcher: None,
         }
     }
 
@@ -62,9 +75,7 @@ impl Codegen {
         self.type_env = vec![HashMap::new()];
         self.registry = self.build_registry(program);
 
-        for stmt in &program.stmts {
-            self.emit_stmt(stmt);
-        }
+        self.emit_function_body(&program.stmts);
         self.out.join("\n")
     }
 
@@ -236,6 +247,166 @@ impl Codegen {
         self.indent -= 1;
     }
 
+    fn generated_name(&mut self, suffix: &str) -> String {
+        let id = self.next_generated_name;
+        self.next_generated_name += 1;
+        format!("__luar_{suffix}_{id}")
+    }
+
+    fn escape_string(value: &str) -> String {
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('\t', "\\t")
+    }
+
+    fn emit_function_body(&mut self, body: &[Stmt]) {
+        if self.target != Target::Luau || !contains_goto(body) {
+            for stmt in body {
+                self.emit_stmt(stmt);
+            }
+            return;
+        }
+
+        let state = self.generated_name("pc");
+        let mut segments: Vec<(String, Vec<&Stmt>)> = vec![("__entry".to_string(), Vec::new())];
+        for stmt in body {
+            if let Stmt::Label { name, .. } = stmt {
+                segments.push((name.clone(), Vec::new()));
+            } else {
+                segments.last_mut().expect("entry segment").1.push(stmt);
+            }
+        }
+
+        self.line(&format!("local {state} = \"__entry\""));
+        self.line(&format!("while {state} ~= nil do"));
+        self.indented(|this| {
+            for (index, (name, statements)) in segments.iter().enumerate() {
+                let keyword = if index == 0 { "if" } else { "elseif" };
+                this.line(&format!(
+                    "{keyword} {state} == \"{}\" then",
+                    Self::escape_string(name)
+                ));
+                this.indented(|this| {
+                    this.line("repeat");
+                    this.indented(|this| {
+                        let previous = this.dispatcher.replace((state.clone(), name.clone()));
+                        for stmt in statements {
+                            this.emit_stmt(stmt);
+                            this.emit_dispatch_guard();
+                        }
+                        this.dispatcher = previous;
+                    });
+                    this.line("until true");
+                    let next = segments.get(index + 1).map(|segment| segment.0.as_str());
+                    if let Some(next) = next {
+                        this.line(&format!(
+                            "if {state} == \"{}\" then {state} = \"{}\" end",
+                            Self::escape_string(name),
+                            Self::escape_string(next)
+                        ));
+                    } else {
+                        this.line(&format!(
+                            "if {state} == \"{}\" then {state} = nil end",
+                            Self::escape_string(name)
+                        ));
+                    }
+                });
+            }
+            this.line("else");
+            this.indented(|this| {
+                this.line(&format!(
+                    "error(\"invalid Luar control state: \" .. tostring({state}))"
+                ))
+            });
+            this.line("end");
+        });
+        self.line("end");
+    }
+
+    fn emit_dispatch_guard(&mut self) {
+        if let Some((state, current)) = &self.dispatcher {
+            let state = state.clone();
+            let current = current.clone();
+            self.line(&format!(
+                "if {state} ~= \"{}\" then break end",
+                Self::escape_string(&current)
+            ));
+        }
+    }
+
+    fn emit_interpolated(&mut self, parts: &[InterpolatedPart]) -> String {
+        if self.target == Target::Luau {
+            let mut output = String::from("`");
+            for part in parts {
+                match part {
+                    InterpolatedPart::Literal(value) => {
+                        output.push_str(
+                            &value
+                                .replace('\\', "\\\\")
+                                .replace('`', "\\`")
+                                .replace('{', "\\{")
+                                .replace('}', "\\}"),
+                        );
+                    }
+                    InterpolatedPart::Expr(expr) => {
+                        output.push('{');
+                        output.push_str(&self.emit_expr(expr));
+                        output.push('}');
+                    }
+                }
+            }
+            output.push('`');
+            return output;
+        }
+
+        let mut values = Vec::new();
+        for part in parts {
+            match part {
+                InterpolatedPart::Literal(value) if !value.is_empty() => {
+                    values.push(format!("\"{}\"", Self::escape_string(value)));
+                }
+                InterpolatedPart::Expr(expr) => {
+                    let expression = self.emit_expr(expr);
+                    values.push(format!("tostring({expression})"));
+                }
+                InterpolatedPart::Literal(_) => {}
+            }
+        }
+        if values.is_empty() {
+            "\"\"".to_string()
+        } else {
+            format!("({})", values.join(" .. "))
+        }
+    }
+
+    fn emit_loop_body(&mut self, body: &[Stmt]) {
+        if self.target == Target::Lua54 && contains_continue(body) {
+            let break_flag = self.generated_name("break");
+            self.line(&format!("local {break_flag} = false"));
+            self.line("repeat");
+            self.indented(|this| {
+                this.continue_wrappers.push(Some(break_flag.clone()));
+                for stmt in body {
+                    this.emit_stmt(stmt);
+                    this.emit_dispatch_guard();
+                }
+                this.continue_wrappers.pop();
+            });
+            self.line("until true");
+            self.line(&format!("if {break_flag} then break end"));
+        } else {
+            self.continue_wrappers.push(None);
+            for stmt in body {
+                self.emit_stmt(stmt);
+                self.emit_dispatch_guard();
+            }
+            self.continue_wrappers.pop();
+        }
+    }
+
     // ─── Statements ───────────────────────────────────────────────────────────
 
     fn emit_stmt(&mut self, stmt: &Stmt) {
@@ -249,7 +420,16 @@ impl Codegen {
                     .map(|e| self.emit_expr(e))
                     .collect::<Vec<_>>()
                     .join(", ");
-                self.line(&format!("const {ns} = {vs}"));
+                if self.target == Target::Lua54 {
+                    let attributed = names
+                        .iter()
+                        .map(|name| format!("{name} <const>"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    self.line(&format!("local {attributed} = {vs}"));
+                } else {
+                    self.line(&format!("const {ns} = {vs}"));
+                }
             }
             Stmt::FunctionDecl {
                 name,
@@ -258,14 +438,16 @@ impl Codegen {
                 is_const,
                 ..
             } => {
-                let prefix = if *is_const { "const " } else { "" };
+                let prefix = if *is_const && self.target == Target::Luau {
+                    "const "
+                } else {
+                    ""
+                };
                 let ps = Self::emit_params_vec(params);
                 self.line(&format!("{prefix}function {name}({ps})"));
                 self.indented(|s| {
                     s.push_scope();
-                    for st in body {
-                        s.emit_stmt(st);
-                    }
+                    s.emit_function_body(body);
                     s.pop_scope();
                 });
                 self.line("end");
@@ -288,6 +470,7 @@ impl Codegen {
                 self.indented(|s| {
                     for st in body {
                         s.emit_stmt(st);
+                        s.emit_dispatch_guard();
                     }
                 });
                 self.line("end");
@@ -295,20 +478,12 @@ impl Codegen {
             Stmt::While { cond, body } => {
                 let c = self.emit_expr(cond);
                 self.line(&format!("while {c} do"));
-                self.indented(|s| {
-                    for st in body {
-                        s.emit_stmt(st);
-                    }
-                });
+                self.indented(|s| s.emit_loop_body(body));
                 self.line("end");
             }
             Stmt::Repeat { body, cond } => {
                 self.line("repeat");
-                self.indented(|s| {
-                    for st in body {
-                        s.emit_stmt(st);
-                    }
-                });
+                self.indented(|s| s.emit_loop_body(body));
                 let c = self.emit_expr(cond);
                 self.line(&format!("until {c}"));
             }
@@ -320,6 +495,7 @@ impl Codegen {
                     self.indented(|s| {
                         for st in &clause.body {
                             s.emit_stmt(st);
+                            s.emit_dispatch_guard();
                         }
                     });
                 }
@@ -328,6 +504,7 @@ impl Codegen {
                     self.indented(|s| {
                         for st in eb {
                             s.emit_stmt(st);
+                            s.emit_dispatch_guard();
                         }
                     });
                 }
@@ -347,11 +524,7 @@ impl Codegen {
                     .map(|e| format!(", {}", self.emit_expr(e)))
                     .unwrap_or_default();
                 self.line(&format!("for {name} = {s}, {l}{st} do"));
-                self.indented(|s| {
-                    for st in body {
-                        s.emit_stmt(st);
-                    }
-                });
+                self.indented(|s| s.emit_loop_body(body));
                 self.line("end");
             }
             Stmt::GenericFor { names, iters, body } => {
@@ -362,11 +535,7 @@ impl Codegen {
                     .collect::<Vec<_>>()
                     .join(", ");
                 self.line(&format!("for {ns} in {is} do"));
-                self.indented(|s| {
-                    for st in body {
-                        s.emit_stmt(st);
-                    }
-                });
+                self.indented(|s| s.emit_loop_body(body));
                 self.line("end");
             }
             Stmt::Return(vals) => {
@@ -381,8 +550,41 @@ impl Codegen {
                     self.line(&format!("return {vs}"));
                 }
             }
-            Stmt::Break => self.line("break"),
-            Stmt::Continue => self.line("continue"),
+            Stmt::Break => {
+                if let Some(Some(flag)) = self.continue_wrappers.last() {
+                    let flag = flag.clone();
+                    self.line(&format!("{flag} = true"));
+                }
+                self.line("break");
+            }
+            Stmt::Continue => {
+                if self.target == Target::Luau {
+                    self.line("continue");
+                } else if self.continue_wrappers.last().is_some_and(Option::is_some) {
+                    self.line("break");
+                } else {
+                    self.line("-- invalid continue (rejected during validation)");
+                }
+            }
+            Stmt::Goto { label, .. } => {
+                if self.target == Target::Lua54 {
+                    self.line(&format!("goto {label}"));
+                } else if let Some((state, _)) = &self.dispatcher {
+                    let state = state.clone();
+                    self.line(&format!("{state} = \"{}\"", Self::escape_string(label)));
+                    self.line("break");
+                }
+            }
+            Stmt::Label { name, .. } => {
+                if self.target == Target::Lua54 {
+                    self.line(&format!("::{name}::"));
+                }
+            }
+            Stmt::RawLua54(source) => {
+                for line in source.lines() {
+                    self.line(line);
+                }
+            }
             Stmt::ExprStmt(e) => {
                 let s = self.emit_expr(e);
                 self.line(&s);
@@ -491,9 +693,7 @@ impl Codegen {
             self.line(&format!("{name}.{meta} = function({ps})"));
             self.indented(|s| {
                 if let Some(body) = &m.body {
-                    for st in body {
-                        s.emit_stmt(st);
-                    }
+                    s.emit_function_body(body);
                 }
             });
             self.line("end");
@@ -520,9 +720,7 @@ impl Codegen {
                     }
                     if let Some(body) = &m.body {
                         s.push_scope();
-                        for st in body {
-                            s.emit_stmt(st);
-                        }
+                        s.emit_function_body(body);
                         s.pop_scope();
                     }
                     s.line("return self");
@@ -544,9 +742,7 @@ impl Codegen {
                 self.indented(|s| {
                     if let Some(body) = &m.body {
                         s.push_scope();
-                        for st in body {
-                            s.emit_stmt(st);
-                        }
+                        s.emit_function_body(body);
                         s.pop_scope();
                     }
                 });
@@ -576,9 +772,7 @@ impl Codegen {
                 }
                 if let Some(body) = &m.body {
                     s.push_scope();
-                    for st in body {
-                        s.emit_stmt(st);
-                    }
+                    s.emit_function_body(body);
                     s.pop_scope();
                 }
                 s.line("return self");
@@ -594,9 +788,7 @@ impl Codegen {
             self.indented(|s| {
                 if let Some(body) = &m.body {
                     s.push_scope();
-                    for st in body {
-                        s.emit_stmt(st);
-                    }
+                    s.emit_function_body(body);
                     s.pop_scope();
                 }
             });
@@ -621,9 +813,7 @@ impl Codegen {
             self.indented(|s| {
                 if let Some(body) = &m.body {
                     s.push_scope();
-                    for st in body {
-                        s.emit_stmt(st);
-                    }
+                    s.emit_function_body(body);
                     s.pop_scope();
                 }
             });
@@ -645,9 +835,7 @@ impl Codegen {
             self.indented(|s| {
                 if let Some(body) = &m.body {
                     s.push_scope();
-                    for st in body {
-                        s.emit_stmt(st);
-                    }
+                    s.emit_function_body(body);
                     s.pop_scope();
                 }
             });
@@ -736,13 +924,9 @@ impl Codegen {
             Expr::False => "false".to_string(),
             Expr::Number(v) => v.clone(),
             Expr::Str(v) => {
-                if v.starts_with('`') {
-                    v.clone()
-                } else {
-                    let escaped = v.replace('\\', "\\\\").replace('"', "\\\"");
-                    format!("\"{escaped}\"")
-                }
+                format!("\"{}\"", Self::escape_string(v))
             }
+            Expr::InterpolatedString(parts) => self.emit_interpolated(parts),
             Expr::Vararg => "...".to_string(),
             Expr::Ident(n) => n.clone(),
             Expr::SelfExpr => "self".to_string(),
@@ -852,9 +1036,7 @@ impl Codegen {
                 let saved = std::mem::take(&mut self.out);
                 self.indent += 1;
                 self.push_scope();
-                for st in body {
-                    self.emit_stmt(st);
-                }
+                self.emit_function_body(body);
                 self.pop_scope();
                 let body_lines = std::mem::replace(&mut self.out, saved);
                 self.indent -= 1;
@@ -867,4 +1049,40 @@ impl Codegen {
             }
         }
     }
+}
+
+fn contains_goto(body: &[Stmt]) -> bool {
+    body.iter().any(|stmt| match stmt {
+        Stmt::Goto { .. } | Stmt::Label { .. } => true,
+        Stmt::Do { body }
+        | Stmt::While { body, .. }
+        | Stmt::Repeat { body, .. }
+        | Stmt::NumericFor { body, .. }
+        | Stmt::GenericFor { body, .. } => contains_goto(body),
+        Stmt::If { clauses, else_body } => {
+            clauses.iter().any(|clause| contains_goto(&clause.body))
+                || else_body.as_deref().is_some_and(contains_goto)
+        }
+        Stmt::FunctionDecl { .. } | Stmt::ClassDecl(_) => false,
+        _ => false,
+    })
+}
+
+fn contains_continue(body: &[Stmt]) -> bool {
+    body.iter().any(|stmt| match stmt {
+        Stmt::Continue => true,
+        Stmt::Do { body } => contains_continue(body),
+        Stmt::If { clauses, else_body } => {
+            clauses.iter().any(|clause| contains_continue(&clause.body))
+                || else_body.as_deref().is_some_and(contains_continue)
+        }
+        // A continue in a nested loop belongs to that loop.
+        Stmt::While { .. }
+        | Stmt::Repeat { .. }
+        | Stmt::NumericFor { .. }
+        | Stmt::GenericFor { .. }
+        | Stmt::FunctionDecl { .. }
+        | Stmt::ClassDecl(_) => false,
+        _ => false,
+    })
 }
