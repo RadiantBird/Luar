@@ -72,6 +72,15 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
   };
 });
 
+connection.onInitialized(() => {
+  // クライアントが初期化前に開いていた文書は、didOpenの順序や同期実装に
+  // 依存せず、ここで必ずインデックスと意味診断を開始する。
+  for (const document of documents.all()) {
+    updateIndex(document);
+    scheduleValidation(document);
+  }
+});
+
 documents.onDidChangeContent(({ document }) => {
   updateIndex(document);
   scheduleValidation(document);
@@ -301,6 +310,9 @@ function runCompilerValidation(document: TextDocument, version: number): void {
   child.stdout.on("data", (chunk: string) => { stdout += chunk; });
   child.stderr.on("data", (chunk: string) => { stderr += chunk; });
   child.on("error", (error: NodeJS.ErrnoException) => {
+    // 入力変更でkillされた古いプロセスのイベントが、新しい結果を
+    // 消去しないようにする。ここを無視すると診断が一瞬だけ出て消える。
+    if (validationProcesses.get(document.uri) !== child) return;
     validationProcesses.delete(document.uri);
     if (error.code === "ENOENT" && !compilerMissingWasReported) {
       compilerMissingWasReported = true;
