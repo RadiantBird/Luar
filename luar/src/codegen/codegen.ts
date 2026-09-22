@@ -232,6 +232,7 @@ export class Codegen {
     switch (stmt.kind) {
       case "ClassDecl":    return this.emitClassDecl(stmt);
       case "Local":        return this.emitLocal(stmt);
+      case "FunctionDecl": return this.emitFunctionDecl(stmt);
       case "Assign":       return this.emitAssign(stmt);
       case "Do":           this.line("do"); this.indented(() => stmt.body.forEach(s => this.emitStmt(s))); this.line("end"); return;
       case "While":        return this.emitWhile(stmt);
@@ -261,6 +262,12 @@ export class Codegen {
         if (t) this.setType(stmt.names[0]!, t);
       }
     }
+  }
+
+  private emitFunctionDecl(stmt: Extract<Stmt, { kind: "FunctionDecl" }>): void {
+    this.line(`function ${stmt.name}(${this.emitParams(stmt.params)})`);
+    this.indented(() => stmt.body.forEach((child) => this.emitStmt(child)));
+    this.line("end");
   }
 
   private emitAssign(stmt: Extract<Stmt, { kind: "Assign" }>): void {

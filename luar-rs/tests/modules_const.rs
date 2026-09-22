@@ -225,6 +225,31 @@ mod.run()
 }
 
 #[test]
+fn top_level_named_functions_compile_with_plain_and_qualified_names() {
+    let output = compile_at(
+        r#"
+local mod = {}
+function mod.run()
+    print("this is mod")
+end
+function greet()
+    print("hello")
+end
+return mod
+"#,
+        Path::new("main.luar"),
+    )
+    .expect("top-level named functions should compile");
+
+    assert!(output.contains("local mod = {}"));
+    assert!(output.contains("function mod.run()"));
+    assert!(output.contains("print(\"this is mod\")"));
+    assert!(output.contains("function greet()"));
+    assert!(output.contains("print(\"hello\")"));
+    assert!(output.contains("return mod"));
+}
+
+#[test]
 fn malformed_definition_function_types_include_path_and_line() {
     let project = TempProject::new();
     project.definition("bad_arrow", "declare run: string -> ()");

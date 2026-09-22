@@ -13,6 +13,20 @@ function hasLine(src: string, expected: string) {
   expect(lines).toContain(expected.trim());
 }
 
+describe("Codegen: Lua関数宣言", () => {
+  it("dotted function declarations are emitted unchanged", () => {
+    const output = gen(`
+local mod = {}
+function mod.run()
+  print("ok")
+end
+return mod
+`);
+    expect(output).toContain("function mod.run()");
+    expect(output).toContain('print("ok")');
+  });
+});
+
 describe("Codegen: クラステーブル", () => {
   it("親なしクラス — テーブルと__index", () => {
     hasLine(`class Foo is end`, "local Foo = {}");

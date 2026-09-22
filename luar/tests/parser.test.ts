@@ -20,6 +20,21 @@ describe("Parser: 型専用import", () => {
   });
 });
 
+describe("Parser: Lua関数宣言", () => {
+  it("accepts global and dotted function declarations", () => {
+    const program = parse(`
+function greet(name: string)
+  print(name)
+end
+function mod.run()
+  print("ok")
+end
+`);
+    expect(program.stmts[0]).toMatchObject({ kind: "FunctionDecl", name: "greet" });
+    expect(program.stmts[1]).toMatchObject({ kind: "FunctionDecl", name: "mod.run" });
+  });
+});
+
 describe("Parser: クラス宣言", () => {
   it("基本的なクラス宣言", () => {
     const c = classDecl("class Foo is\nend");

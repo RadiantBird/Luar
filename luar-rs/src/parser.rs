@@ -96,6 +96,7 @@ impl Parser {
         match self.peek_kind().clone() {
             TokenKind::Class => self.parse_class_decl(),
             TokenKind::Local => self.parse_local(),
+            TokenKind::Function => self.parse_function_decl(),
             TokenKind::Do => self.parse_do(),
             TokenKind::While => self.parse_while(),
             TokenKind::Repeat => self.parse_repeat(),
@@ -193,6 +194,32 @@ impl Parser {
             names,
             types,
             values,
+        })
+    }
+
+    fn parse_function_decl(&mut self) -> Result<Stmt, ParseError> {
+        self.eat(&TokenKind::Function)?;
+        let mut name = self.eat_ident()?;
+        while self.match_tok(&TokenKind::Dot) {
+            name.push('.');
+            name.push_str(&self.eat_ident()?);
+        }
+        self.eat(&TokenKind::LParen)?;
+        let params = self.parse_params()?;
+        self.eat(&TokenKind::RParen)?;
+        let return_type = if self.match_tok(&TokenKind::Colon) {
+            Some(self.parse_type_expr()?)
+        } else {
+            None
+        };
+        let body = self.parse_block(&[TokenKind::End])?;
+        self.eat(&TokenKind::End)?;
+        Ok(Stmt::FunctionDecl {
+            name,
+            params,
+            return_type,
+            body,
+            is_const: false,
         })
     }
 

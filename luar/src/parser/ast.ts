@@ -46,6 +46,7 @@ export type Stmt =
   | { kind: "Break" }
   | { kind: "Continue" }
   | { kind: "ExprStmt"; expr: Expr }
+  | FunctionDecl
   | ClassDecl
   | ImportDecl
   | DeclareStmt;
@@ -54,6 +55,15 @@ export type Stmt =
 export type ImportDecl = {
   kind: "ImportDecl";
   moduleName: string;
+};
+
+// function <name>[.<member>](...) ... end
+export type FunctionDecl = {
+  kind: "FunctionDecl";
+  name: string;
+  params: Param[];
+  returnType: TypeExpr | null;
+  body: Stmt[];
 };
 
 // declare [global] <name>: <type>

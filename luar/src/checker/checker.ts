@@ -284,6 +284,9 @@ export class Checker {
         }
         break;
       }
+      case "FunctionDecl":
+        this.checkBodyAccess(stmt.body, new Map(env), currentClass, line);
+        break;
       case "Assign":
         [...stmt.targets, ...stmt.values].forEach(e => this.checkExprAccess(e, env, currentClass, line));
         break;
@@ -391,6 +394,7 @@ export class Checker {
   private checkStmtForSuper(stmt: Stmt, classInfo: ClassInfo, decl: ClassDecl): void {
     switch (stmt.kind) {
       case "Local":      stmt.values.forEach(e => this.checkExprForSuper(e, classInfo, decl)); break;
+      case "FunctionDecl": this.checkBodyForSuper(stmt.body, classInfo, decl); break;
       case "Assign":     [...stmt.targets, ...stmt.values].forEach(e => this.checkExprForSuper(e, classInfo, decl)); break;
       case "Return":     stmt.values.forEach(e => this.checkExprForSuper(e, classInfo, decl)); break;
       case "ExprStmt":   this.checkExprForSuper(stmt.expr, classInfo, decl); break;

@@ -3,7 +3,7 @@ import type { Token, TokenKind } from "../lexer/token.js";
 import type {
   Program, Stmt, Expr, Param, TypeExpr, TableField,
   ClassDecl, MemberBlock, Member, FieldMember, MethodMember,
-  IfClause, AccessMod, ImportDecl, DeclareStmt,
+  IfClause, AccessMod, ImportDecl, DeclareStmt, FunctionDecl,
 } from "./ast.js";
 
 export class ParseError extends Error {
@@ -72,6 +72,7 @@ export class Parser {
     switch (t.kind) {
       case "class":   return this.parseClassDecl();
       case "local":   return this.parseLocal();
+      case "function": return this.parseFunctionDecl();
       case "do":      return this.parseDo();
       case "while":   return this.parseWhile();
       case "repeat":  return this.parseRepeat();
@@ -114,6 +115,15 @@ export class Parser {
     let values: Expr[] = [];
     if (this.match("=")) values = this.parseExprList();
     return { kind: "Local", names, types, values };
+  }
+
+  private parseFunctionDecl(): FunctionDecl {
+    this.eat("function");
+    let name = this.eatIdent();
+    while (this.match(".")) name += `.${this.eatIdent()}`;
+    const { params, returnType } = this.parseFuncSignature();
+    const body = this.parseFuncBody();
+    return { kind: "FunctionDecl", name, params, returnType, body };
   }
 
   private parseDo(): Stmt {

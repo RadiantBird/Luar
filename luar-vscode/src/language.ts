@@ -395,7 +395,17 @@ function isParameterToken(tokens: Token[], index: number): boolean {
 }
 
 function collectFunctions(stmt: Stmt, index: DocumentIndex, tokens: Token[], searchFrom: number): void {
-  if (stmt.kind === "Local") {
+  if (stmt.kind === "FunctionDecl") {
+    const parts = stmt.name.split(".");
+    const first = findToken(tokens, parts[0]!, searchFrom);
+    const pos = parts.length === 1
+      ? first
+      : findToken(tokens, parts[parts.length - 1]!, Math.max(first + 1, searchFrom));
+    if (pos >= 0) {
+      const parent = parts.length > 1 ? parts.slice(0, -1).join(".") : undefined;
+      addSymbol(index, makeSymbol(parts[parts.length - 1]!, "function", functionSignature(stmt.name, stmt.params, stmt.returnType), tokens[pos], tokens[pos], parent));
+    }
+  } else if (stmt.kind === "Local") {
     stmt.names.forEach((name, i) => {
       const value = stmt.values[i];
       if (value?.kind !== "Function") return;
