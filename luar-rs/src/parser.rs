@@ -725,12 +725,13 @@ impl Parser {
             if lp < min_prec {
                 break;
             }
-            self.advance();
+            let operator_span = self.advance().span();
             let right = self.parse_binop(rp)?;
             left = Expr::Binop {
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
+                span: operator_span,
             };
         }
         Ok(left)

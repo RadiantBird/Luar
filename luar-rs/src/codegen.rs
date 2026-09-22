@@ -1022,7 +1022,9 @@ impl Codegen {
                 let e = self.emit_expr(expr);
                 format!("{op} {e}")
             }
-            Expr::Binop { op, left, right } => {
+            Expr::Binop {
+                op, left, right, ..
+            } => {
                 let l = self.emit_expr(left);
                 let r = self.emit_expr(right);
                 format!("{l} {op} {r}")

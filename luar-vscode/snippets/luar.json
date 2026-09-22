@@ -158,6 +158,13 @@
       "local ${1:name} = ${0}"
     ]
   },
+  "Typed Local Variable": {
+    "prefix": "loct",
+    "description": "Local variable declaration with a primitive type annotation",
+    "body": [
+      "local ${1:name}: ${2|number,string,boolean,table,function,any|} = ${0}"
+    ]
+  },
   "Goto Label": {
     "prefix": "label",
     "description": "A goto target label",

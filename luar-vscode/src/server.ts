@@ -55,6 +55,8 @@ interface CompilerDiagnostic {
   message: string;
 }
 
+const PRIMITIVE_TYPES = ["number", "string", "boolean", "nil", "table", "function", "any"] as const;
+
 let settings: CompilerSettings = { compilerPath: "luar", target: "luau" };
 let compilerMissingWasReported = false;
 
@@ -63,7 +65,7 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
   return {
     capabilities: {
       textDocumentSync: TextDocumentSyncKind.Incremental,
-      completionProvider: { triggerCharacters: ["."] },
+      completionProvider: { triggerCharacters: [".", ":"] },
       hoverProvider: true,
       documentSymbolProvider: true,
     },
@@ -108,6 +110,15 @@ connection.onCompletion((params: CompletionParams): CompletionItem[] => {
   const before = document.getText({ start: { line: params.position.line, character: 0 }, end: params.position });
   if (/\bimport\s+[A-Za-z_0-9]*$/.test(before)) {
     return [{ label: "type", kind: CompletionItemKind.Keyword, detail: "type-only module import" }];
+  }
+  // 型注釈の直後は識別子補完より先にプリミティブ型を提示する。
+  // `local value: ` と関数引数 `function f(value: ` の双方に使える。
+  const typeMatch = before.match(/:\s*([A-Za-z_]*)$/);
+  if (typeMatch) {
+    const prefix = typeMatch[1] ?? "";
+    return PRIMITIVE_TYPES
+      .filter((type) => type.startsWith(prefix))
+      .map((type) => ({ label: type, kind: CompletionItemKind.TypeParameter, detail: "Luar primitive type" }));
   }
   const gotoMatch = before.match(/\bgoto\s+([A-Za-z_][A-Za-z0-9_]*)?$/);
   if (gotoMatch) {

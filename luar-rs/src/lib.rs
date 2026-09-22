@@ -363,18 +363,13 @@ pub fn analyze_source_with_options(
     }));
     let checker_errors = checker::Checker::new().check(&mut program);
     errors.extend(checker_errors.into_iter().map(|error| {
-        diagnostic_from_expanded(
-            &expanded,
-            &file,
-            SourceSpan {
-                line: error.line.max(1),
-                column: 1,
-                end_line: error.line.max(1),
-                end_column: 2,
-            },
-            Severity::Error,
-            error.message,
-        )
+        let span = error.span.unwrap_or(SourceSpan {
+            line: error.line.max(1),
+            column: 1,
+            end_line: error.line.max(1),
+            end_column: 2,
+        });
+        diagnostic_from_expanded(&expanded, &file, span, Severity::Error, error.message)
     }));
     errors.extend(control_flow::validate(&program).into_iter().map(|error| {
         diagnostic_from_expanded(

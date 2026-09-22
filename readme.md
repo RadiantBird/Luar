@@ -35,6 +35,26 @@ love.graphics.print("hello")
 
 `import type love`は宣言だけを読み、`require`などの実行時コードを生成しない。未宣言の`love`や綴り誤りの`lovve`はwarningになる。
 
+## プリミティブ型と静的検査
+
+ローカル変数、`const`、関数引数にはプリミティブ型を注釈できる。VS Codeではコロンの直後で`number`、`string`、`boolean`、`nil`、`table`、`function`、`any`を補完し、型名を専用の色で表示する。
+
+```lua
+local score: number = 0
+local title: string = "Star Catcher"
+local active: boolean = true
+```
+
+コンパイラは注釈とリテラルから確定できる型を追跡する。明らかに不正な初期化・代入、または演算子オーバーロードの引数型はコンパイルエラーになる。
+
+```lua
+local a: number = 1
+local b: string = "A"
+local c = a + b -- error: '+' はnumber同士だけに使用できる
+```
+
+`love.timer.getTime()`のような外部runtime由来の値は静的に型を断定できないため、推論だけで拒否しない。必要なら戻り値を`.luard`の宣言やローカル注釈で表す。
+
 ## 概要
 Luau言語から派生し、ついにオブジェクト指向・テーブルのディープコピーを実現。
 

@@ -45,6 +45,8 @@ pub enum Expr {
         op: String,
         left: Box<Expr>,
         right: Box<Expr>,
+        /// 演算子そのものの位置。型エラーを式の先頭ではなく演算子へ表示する。
+        span: SourceSpan,
     },
     Table(Vec<TableField>),
     Function {

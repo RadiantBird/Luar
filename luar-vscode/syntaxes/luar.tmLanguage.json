@@ -9,6 +9,7 @@
     { "include": "#string" },
     { "include": "#number" },
     { "include": "#include-macro" },
+    { "include": "#type-annotation" },
     { "include": "#const-decl" },
     { "include": "#import-decl" },
     { "include": "#declare-decl" },
@@ -70,6 +71,14 @@
         "2": { "name": "punctuation.section.parens.begin.luar" },
         "3": { "name": "string.quoted.other.luar" },
         "4": { "name": "punctuation.section.parens.end.luar" }
+      }
+    },
+    "type-annotation": {
+      "comment": "Primitive types following a Luar type annotation colon",
+      "match": "(:)([ \\t]*)(number|string|boolean|nil|table|function|any)\\b",
+      "captures": {
+        "1": { "name": "punctuation.separator.annotation.luar" },
+        "3": { "name": "support.type.primitive.luar" }
       }
     },
     "import-decl": {

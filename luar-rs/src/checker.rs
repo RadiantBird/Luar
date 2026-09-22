@@ -1,10 +1,12 @@
 use crate::ast::*;
+use crate::lexer::SourceSpan;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct CheckError {
     pub message: String,
     pub line: usize,
+    pub span: Option<SourceSpan>,
 }
 
 #[derive(Clone)]
@@ -35,6 +37,37 @@ struct FieldInfo {
 enum ReceiverKind {
     Class(String),
     Instance(String),
+}
+
+/// コンパイル時に確定できる範囲だけを表す、意図的に小さな型格子。
+/// Unknown は外部ランタイム値であり、推測だけで拒否しない。
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ValueType {
+    Unknown,
+    Nil,
+    Boolean,
+    Number,
+    String,
+    Table,
+    Function,
+    Class(String),
+    Optional(Box<ValueType>),
+}
+
+impl ValueType {
+    fn display(&self) -> String {
+        match self {
+            Self::Unknown => "unknown".to_string(),
+            Self::Nil => "nil".to_string(),
+            Self::Boolean => "boolean".to_string(),
+            Self::Number => "number".to_string(),
+            Self::String => "string".to_string(),
+            Self::Table => "table".to_string(),
+            Self::Function => "function".to_string(),
+            Self::Class(name) => name.clone(),
+            Self::Optional(inner) => format!("{}?", inner.display()),
+        }
+    }
 }
 
 pub struct Checker {
@@ -79,7 +112,346 @@ impl Checker {
         // Pass 3: access control
         self.check_access_control(program);
 
+        // Pass 4: 型注釈と明白な演算だけを検査する。Lua の外部値を
+        // Unknown として残すため、ランタイム依存のコードは妨げない。
+        self.check_value_types(program);
+
         std::mem::take(&mut self.errors)
+    }
+
+    fn check_value_types(&mut self, program: &Program) {
+        let mut env = HashMap::new();
+        for stmt in &program.stmts {
+            self.check_stmt_types(stmt, &mut env);
+        }
+    }
+
+    fn type_from_annotation(&self, ty: &TypeExpr) -> ValueType {
+        match ty {
+            TypeExpr::Optional(inner) => {
+                ValueType::Optional(Box::new(self.type_from_annotation(inner)))
+            }
+            TypeExpr::Tuple(_) => ValueType::Unknown,
+            TypeExpr::Name(name) => match name.as_str() {
+                "nil" => ValueType::Nil,
+                "boolean" => ValueType::Boolean,
+                "number" => ValueType::Number,
+                "string" => ValueType::String,
+                "table" => ValueType::Table,
+                "function" => ValueType::Function,
+                "any" | "unknown" => ValueType::Unknown,
+                _ if self.classes.contains_key(name) => ValueType::Class(name.clone()),
+                _ => ValueType::Unknown,
+            },
+        }
+    }
+
+    fn is_assignable(expected: &ValueType, actual: &ValueType) -> bool {
+        match (expected, actual) {
+            (_, ValueType::Unknown) | (ValueType::Unknown, _) => true,
+            (ValueType::Optional(_), ValueType::Nil) => true,
+            (ValueType::Optional(inner), actual) => Self::is_assignable(inner, actual),
+            _ => expected == actual,
+        }
+    }
+
+    fn check_stmt_types(&mut self, stmt: &Stmt, env: &mut HashMap<String, ValueType>) {
+        match stmt {
+            Stmt::Local {
+                names,
+                types,
+                values,
+            }
+            | Stmt::Const {
+                names,
+                types,
+                values,
+            } => {
+                for (index, name) in names.iter().enumerate() {
+                    let actual = values
+                        .get(index)
+                        .map(|value| self.infer_expr_type(value, env))
+                        .unwrap_or(ValueType::Unknown);
+                    let declared = types
+                        .get(index)
+                        .and_then(Option::as_ref)
+                        .map(|ty| self.type_from_annotation(ty));
+                    if let Some(expected) = declared {
+                        if !Self::is_assignable(&expected, &actual) {
+                            self.err(
+                                format!(
+                                    "cannot assign {} to '{}: {}'",
+                                    actual.display(),
+                                    name,
+                                    expected.display()
+                                ),
+                                1,
+                            );
+                        }
+                        env.insert(name.clone(), expected);
+                    } else {
+                        env.insert(name.clone(), actual);
+                    }
+                }
+            }
+            Stmt::Assign { targets, values } => {
+                for (target, value) in targets.iter().zip(values) {
+                    let actual = self.infer_expr_type(value, env);
+                    if let Expr::Ident { name, .. } = target {
+                        if let Some(expected) = env.get(name).cloned() {
+                            if !Self::is_assignable(&expected, &actual) {
+                                self.err(
+                                    format!(
+                                        "cannot assign {} to '{}: {}'",
+                                        actual.display(),
+                                        name,
+                                        expected.display()
+                                    ),
+                                    1,
+                                );
+                            }
+                        } else {
+                            env.insert(name.clone(), actual);
+                        }
+                    }
+                }
+            }
+            Stmt::FunctionDecl {
+                name, params, body, ..
+            } => {
+                env.insert(name.clone(), ValueType::Function);
+                let mut child = env.clone();
+                for param in params {
+                    if let Param::Named { name, ty } = param {
+                        child.insert(
+                            name.clone(),
+                            ty.as_ref()
+                                .map(|ty| self.type_from_annotation(ty))
+                                .unwrap_or(ValueType::Unknown),
+                        );
+                    }
+                }
+                for child_stmt in body {
+                    self.check_stmt_types(child_stmt, &mut child);
+                }
+            }
+            Stmt::Do { body } | Stmt::While { body, .. } | Stmt::Repeat { body, .. } => {
+                if let Stmt::While { cond, .. } | Stmt::Repeat { cond, .. } = stmt {
+                    self.infer_expr_type(cond, env);
+                }
+                let mut child = env.clone();
+                for child_stmt in body {
+                    self.check_stmt_types(child_stmt, &mut child);
+                }
+            }
+            Stmt::If { clauses, else_body } => {
+                for clause in clauses {
+                    self.infer_expr_type(&clause.cond, env);
+                    let mut child = env.clone();
+                    for child_stmt in &clause.body {
+                        self.check_stmt_types(child_stmt, &mut child);
+                    }
+                }
+                if let Some(body) = else_body {
+                    let mut child = env.clone();
+                    for child_stmt in body {
+                        self.check_stmt_types(child_stmt, &mut child);
+                    }
+                }
+            }
+            Stmt::NumericFor {
+                name,
+                start,
+                limit,
+                step,
+                body,
+            } => {
+                self.infer_expr_type(start, env);
+                self.infer_expr_type(limit, env);
+                if let Some(step) = step {
+                    self.infer_expr_type(step, env);
+                }
+                let mut child = env.clone();
+                child.insert(name.clone(), ValueType::Number);
+                for child_stmt in body {
+                    self.check_stmt_types(child_stmt, &mut child);
+                }
+            }
+            Stmt::GenericFor { names, iters, body } => {
+                for iter in iters {
+                    self.infer_expr_type(iter, env);
+                }
+                let mut child = env.clone();
+                for name in names {
+                    child.insert(name.clone(), ValueType::Unknown);
+                }
+                for child_stmt in body {
+                    self.check_stmt_types(child_stmt, &mut child);
+                }
+            }
+            Stmt::Return(values) => {
+                for value in values {
+                    self.infer_expr_type(value, env);
+                }
+            }
+            Stmt::ExprStmt(expr) => {
+                self.infer_expr_type(expr, env);
+            }
+            _ => {}
+        }
+    }
+
+    fn infer_expr_type(&mut self, expr: &Expr, env: &HashMap<String, ValueType>) -> ValueType {
+        match expr {
+            Expr::Nil => ValueType::Nil,
+            Expr::True | Expr::False => ValueType::Boolean,
+            Expr::Number(_) => ValueType::Number,
+            Expr::Str(_) => ValueType::String,
+            Expr::Table(_) => ValueType::Table,
+            Expr::Function { .. } => ValueType::Function,
+            Expr::Ident { name, .. } => env.get(name).cloned().unwrap_or_else(|| {
+                if self.classes.contains_key(name) {
+                    ValueType::Class(name.clone())
+                } else {
+                    ValueType::Unknown
+                }
+            }),
+            Expr::Call { callee, args } => {
+                for arg in args {
+                    self.infer_expr_type(arg, env);
+                }
+                if let Expr::Field { obj, name } = callee.as_ref() {
+                    if name == "new" {
+                        if let Expr::Ident { name: class, .. } = obj.as_ref() {
+                            if self.classes.contains_key(class) {
+                                return ValueType::Class(class.clone());
+                            }
+                        }
+                    }
+                }
+                ValueType::Unknown
+            }
+            Expr::MethodCall { obj, args, .. } => {
+                self.infer_expr_type(obj, env);
+                for arg in args {
+                    self.infer_expr_type(arg, env);
+                }
+                ValueType::Unknown
+            }
+            Expr::Field { obj, .. } => {
+                self.infer_expr_type(obj, env);
+                ValueType::Unknown
+            }
+            Expr::Index { obj, key } => {
+                self.infer_expr_type(obj, env);
+                self.infer_expr_type(key, env);
+                ValueType::Unknown
+            }
+            Expr::Unop { op, expr } => {
+                let actual = self.infer_expr_type(expr, env);
+                if op == "-" && actual != ValueType::Unknown && actual != ValueType::Number {
+                    self.err(
+                        format!("unary '-' expects number, got {}", actual.display()),
+                        1,
+                    );
+                }
+                if op == "not" {
+                    ValueType::Boolean
+                } else if op == "-" {
+                    ValueType::Number
+                } else {
+                    ValueType::Unknown
+                }
+            }
+            Expr::Binop {
+                op,
+                left,
+                right,
+                span,
+            } => {
+                let left_type = self.infer_expr_type(left, env);
+                let right_type = self.infer_expr_type(right, env);
+                self.check_binary_operator(op, &left_type, &right_type, *span);
+                match op.as_str() {
+                    "+" | "-" | "*" | "/" | "//" | "%" | "^" => ValueType::Number,
+                    ".." => ValueType::String,
+                    "<" | ">" | "<=" | ">=" | "==" | "~=" => ValueType::Boolean,
+                    _ => ValueType::Unknown,
+                }
+            }
+            Expr::InterpolatedString(parts) => {
+                for part in parts {
+                    if let InterpolatedPart::Expr(expr) = part {
+                        self.infer_expr_type(expr, env);
+                    }
+                }
+                ValueType::String
+            }
+            _ => ValueType::Unknown,
+        }
+    }
+
+    fn check_binary_operator(
+        &mut self,
+        op: &str,
+        left: &ValueType,
+        right: &ValueType,
+        span: SourceSpan,
+    ) {
+        if let ValueType::Class(class_name) = left {
+            if let Some(info) = self.classes.get(class_name) {
+                if let Some(method) = info.methods.get(&format!("operator{op}")) {
+                    if let Some(Param::Named {
+                        ty: Some(expected), ..
+                    }) = method.method.params.first()
+                    {
+                        let expected = self.type_from_annotation(expected);
+                        if !Self::is_assignable(&expected, right) {
+                            self.err_at(
+                                format!(
+                                    "operator '{}' for '{}' expects {}, got {}",
+                                    op,
+                                    class_name,
+                                    expected.display(),
+                                    right.display()
+                                ),
+                                span,
+                            );
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+        let arithmetic = matches!(op, "+" | "-" | "*" | "/" | "//" | "%" | "^");
+        if arithmetic
+            && *left != ValueType::Unknown
+            && *right != ValueType::Unknown
+            && (left != &ValueType::Number || right != &ValueType::Number)
+        {
+            self.err_at(
+                format!(
+                    "operator '{}' expects number operands, got {} and {}",
+                    op,
+                    left.display(),
+                    right.display()
+                ),
+                span,
+            );
+        }
+        if op == ".." && *left != ValueType::Unknown && *right != ValueType::Unknown {
+            let valid = |ty: &ValueType| matches!(ty, ValueType::String | ValueType::Number);
+            if !valid(left) || !valid(right) {
+                self.err_at(
+                    format!(
+                        "operator '..' expects string or number operands, got {} and {}",
+                        left.display(),
+                        right.display()
+                    ),
+                    span,
+                );
+            }
+        }
     }
 
     // ─── Pass 1: Registration ─────────────────────────────────────────────────
@@ -811,7 +1183,19 @@ impl Checker {
     }
 
     fn err(&mut self, message: String, line: usize) {
-        self.errors.push(CheckError { message, line });
+        self.errors.push(CheckError {
+            message,
+            line,
+            span: None,
+        });
+    }
+
+    fn err_at(&mut self, message: String, span: SourceSpan) {
+        self.errors.push(CheckError {
+            message,
+            line: span.line,
+            span: Some(span),
+        });
     }
 }
 
