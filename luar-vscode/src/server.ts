@@ -19,6 +19,7 @@ import {
   DidChangeConfigurationParams,
 } from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
+import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
@@ -359,7 +360,7 @@ function publishCompilerDiagnostics(ownerUri: string, sourcePath: string, diagno
   const previousUris = publishedCompilerUris.get(ownerUri) ?? new Set<string>();
   const byUri = new Map<string, Diagnostic[]>();
   for (const diagnostic of diagnostics) {
-    const uri = pathToFileURL(diagnostic.file || sourcePath).toString();
+    const uri = diagnosticUri(ownerUri, sourcePath, diagnostic.file);
     const list = byUri.get(uri) ?? [];
     list.push({
       severity: diagnostic.severity === "warning" ? DiagnosticSeverity.Warning : DiagnosticSeverity.Error,
@@ -378,6 +379,32 @@ function publishCompilerDiagnostics(ownerUri: string, sourcePath: string, diagno
   compilerDiagnosticsByOwner.set(ownerUri, byUri);
   publishedCompilerUris.set(ownerUri, uris);
   for (const uri of new Set([...previousUris, ...uris])) publishUriDiagnostics(uri);
+}
+
+function diagnosticUri(ownerUri: string, sourcePath: string, diagnosticFile: string): string {
+  const filePath = diagnosticFile || sourcePath;
+  const normalized = normalizeFilePath(filePath);
+
+  // メインファイルはクライアントから渡されたURIをそのまま使う。
+  // WindowsではVS Code URIとpathToFileURLでドライブ文字の大小などが
+  // 異なることがあり、作り直すと診断が別文書へ送られてしまう。
+  if (normalized === normalizeFilePath(sourcePath)) return ownerUri;
+
+  // include先が開かれている場合も、その文書が実際に使うURIへ合わせる。
+  for (const document of documents.all()) {
+    try {
+      if (normalizeFilePath(fileURLToPath(document.uri)) === normalized) return document.uri;
+    } catch {
+      // file以外のURIはコンパイラ診断の対象外。
+    }
+  }
+
+  return pathToFileURL(path.resolve(filePath)).toString();
+}
+
+function normalizeFilePath(filePath: string): string {
+  const normalized = path.normalize(path.resolve(filePath));
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
 function clearCompilerDiagnostics(ownerUri: string): void {
