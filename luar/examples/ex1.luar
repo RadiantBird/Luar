@@ -1,0 +1,46 @@
+class Cat is
+    private is
+        name: string = "Fluffy"
+    end
+    public is
+        static function new()
+            self.name = "Floppa"
+            print(`A new cat named {self.name} is born`)
+        end
+
+        function meow()
+            print("Meow!")
+        end
+
+        function work() final
+            print("The cat is working hard!")
+        end
+    end
+end
+
+class RoyalCat is Cat
+    private is
+        name: string = "Sir Fluffy"
+    end
+    public is
+        static function new() override
+            self.name = "Sir Floppa"
+            print(`A royal cat named {self.name} is born`)
+        end
+
+        function meow() override
+            print("Meow, I am a royal cat!")
+        end
+
+        function laugh()
+            print("Nehehehe!")
+        end
+    end
+end
+
+local cat1 = Cat.new()
+local cat2 = RoyalCat.new()
+cat1.meow()
+cat2.meow()
+cat1.work()
+cat2.laugh()

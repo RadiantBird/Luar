@@ -1,0 +1,22 @@
+class Animal is
+    private is
+        name = "unknown"
+    end
+    public is
+        static function new(n: string)
+            self.name = n
+        end
+        function speak() end
+    end
+end
+
+class Dog is Animal
+    public is
+        function speak() override
+            print("Woof!")
+        end
+    end
+end
+
+local d = Dog.new("Rex")
+d.speak()

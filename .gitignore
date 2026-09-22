@@ -1,0 +1,18 @@
+# Rust build output
+luar-rs/target/
+
+# TypeScript / VS Code build output
+luar/node_modules/
+luar/dist/
+luar-vscode/node_modules/
+luar-vscode/out/
+luar-vscode/*.vsix
+
+# Editor and operating-system files
+.vscode/*.local.json
+.DS_Store
+Thumbs.db
+
+# Temporary and generated files
+*.log
+*.tmp

@@ -1,0 +1,38 @@
+class Language is abstract
+    year = 1901
+    public is
+        function explain() abstract
+    end
+end
+
+class Binary is Language
+    year = 1930
+    public is
+        function explain() override
+            print("made by 0 and 1")
+        end
+    end
+end
+
+class ASM is Binary
+    year = 1940
+    public is
+        function explain() override
+            print("made with ASCII")
+        end
+
+        function assembly() final
+            print("B0 0A >>> MOV AL, 10")
+        end
+    end
+end
+
+class C is ASM
+    year = 1972
+    public is
+        function explain() override
+            super.explain()
+            print("made with English")
+        end
+    end
+end
