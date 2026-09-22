@@ -26,12 +26,12 @@ pub fn expand_source(source: &str, source_path: Option<&Path>) -> Result<String,
 
 fn expand_with_path(source: &str, source_path: &Path, stack: &mut Vec<PathBuf>) -> Result<String, String> {
     let directory = source_path.parent().unwrap_or_else(|| Path::new(""));
-    let mut output = Vec::new();
+    let mut output: Vec<String> = Vec::new();
 
     for (index, line) in source.lines().enumerate() {
         let line_number = index + 1;
         let Some(declaration) = parse_include_declaration(line) else {
-            output.push(line);
+            output.push(line.to_string());
             continue;
         };
 
@@ -87,9 +87,9 @@ fn expand_with_path(source: &str, source_path: &Path, stack: &mut Vec<PathBuf>) 
         stack.pop();
         let expanded_body = expanded_body?;
 
-        output.push(&expanded_body);
+        output.push(expanded_body);
         if returned_name != declaration.name {
-            output.push(&format!(
+            output.push(format!(
                 "{} {} = {}",
                 declaration.binding, declaration.name, returned_name
             ));
