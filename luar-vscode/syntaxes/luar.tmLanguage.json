@@ -8,6 +8,9 @@
     { "include": "#template-string" },
     { "include": "#string" },
     { "include": "#number" },
+    { "include": "#const-decl" },
+    { "include": "#import-decl" },
+    { "include": "#declare-decl" },
     { "include": "#function-decl" },
     { "include": "#class-decl" },
     { "include": "#keyword" },
@@ -50,6 +53,30 @@
         { "name": "constant.numeric.luar", "match": "\\b\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?\\b" }
       ]
     },
+    "const-decl": {
+      "comment": "contextual const declaration",
+      "match": "\\b(const)\\b(?=[ \\t]+(?:function\\b|[A-Za-z_][A-Za-z0-9_]*))",
+      "captures": {
+        "1": { "name": "storage.modifier.const.luar" }
+      }
+    },
+    "import-decl": {
+      "comment": "import module",
+      "match": "\\b(import)\\b[ \\t]+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.control.import.luar" },
+        "2": { "name": "entity.name.namespace.luar" }
+      }
+    },
+    "declare-decl": {
+      "comment": "ambient declaration",
+      "match": "\\b(declare)\\b(?:[ \\t]+(global)\\b)?[ \\t]+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.control.declare.luar" },
+        "2": { "name": "storage.modifier.global.luar" },
+        "3": { "name": "variable.other.readwrite.luar" }
+      }
+    },
     "function-decl": {
       "patterns": [
         {
@@ -80,7 +107,7 @@
     },
     "keyword": {
       "name": "keyword.luar",
-      "match": "\\b(is|public|private|static|abstract|override|final|super|operator|end|if|then|else|elseif|while|for|do|repeat|until|in|break|continue|return|local|self|and|or|not)\\b"
+      "match": "\\b(is|public|private|static|abstract|override|final|super|operator|end|if|then|else|elseif|while|for|do|repeat|until|in|break|continue|return|local|self|and|or|not|import|declare|global)\\b"
     },
     "constant": {
       "name": "constant.language.luar",

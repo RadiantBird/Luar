@@ -27,12 +27,12 @@
   "wordPattern": "(-?\\d*\\.\\d\\w*)|([^\\`\\~\\!\\@\\#\\%\\^\\&\\*\\(\\)\\-\\=\\+\\[\\{\\]\\}\\|\\;\\:\\'\\\"\\,\\.\\<\\>\\/\\?\\s]+)",
   "folding": {
     "markers": {
-      "start": "\\b(function|do|class|public|private|repeat)\\b",
+      "start": "\\b(function|do|class|public|private|if|while|for|repeat)\\b",
       "end": "\\b(end|until)\\b"
     }
   },
   "indentationRules": {
-    "increaseIndentPattern": "\\b(function|do|class|public|private|if|then|else|elseif|while|for|repeat)\\b(?!.*\\bend\\b).*$",
+    "increaseIndentPattern": "\\b(function|do|class|public|private|if|while|for|repeat)\\b(?!.*\\bend\\b).*$",
     "decreaseIndentPattern": "^\\s*\\b(end|else|elseif|until)\\b"
   }
 }
