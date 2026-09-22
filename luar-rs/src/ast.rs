@@ -81,11 +81,14 @@ pub enum Stmt {
         names: Vec<String>,
         types: Vec<Option<TypeExpr>>,
         values: Vec<Expr>,
+        /// 宣言由来の型不一致を、実際の宣言行へ報告するために保持する。
+        line: usize,
     },
     Const {
         names: Vec<String>,
         types: Vec<Option<TypeExpr>>,
         values: Vec<Expr>,
+        line: usize,
     },
     FunctionDecl {
         name: String,

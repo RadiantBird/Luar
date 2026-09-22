@@ -230,6 +230,7 @@ impl Parser {
             names,
             types,
             values,
+            line,
         })
     }
 
@@ -262,7 +263,7 @@ impl Parser {
     // ─── Local / Assign ───────────────────────────────────────────────────────
 
     fn parse_local(&mut self) -> Result<Stmt, ParseError> {
-        self.eat(&TokenKind::Local)?;
+        let line = self.eat(&TokenKind::Local)?.line;
         // Lua-compatible named local function declaration.  Represent it as a
         // local binding whose value is a function expression so every later
         // compiler pass retains ordinary lexical-binding semantics.
@@ -286,6 +287,7 @@ impl Parser {
                     return_type,
                     body,
                 }],
+                line,
             });
         }
         let mut names = vec![self.eat_ident()?];
@@ -303,6 +305,7 @@ impl Parser {
             names,
             types,
             values,
+            line,
         })
     }
 

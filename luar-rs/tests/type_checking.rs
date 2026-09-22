@@ -19,12 +19,23 @@ fn rejects_arithmetic_with_inferred_incompatible_primitives() {
 
 #[test]
 fn rejects_incompatible_type_annotation() {
-    let errors = check("local title: string = 42\n").expect_err("annotated mismatch must fail");
+    let errors = check("local ignored = true\nlocal title: string = 42\n")
+        .expect_err("annotated mismatch must fail");
     assert!(
         errors
             .iter()
             .any(|error| error.contains("cannot assign number to 'title: string'"))
     );
+}
+
+#[test]
+fn reports_annotation_mismatch_on_its_declaration_line() {
+    let errors = check_source_with_options(
+        "local ignored = true\nlocal title: string = 42\n",
+        &CompileOptions::default(),
+    )
+    .expect_err("annotated mismatch must fail");
+    assert_eq!(errors[0].line, 2);
 }
 
 #[test]

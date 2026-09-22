@@ -161,11 +161,13 @@ impl Checker {
                 names,
                 types,
                 values,
+                line,
             }
             | Stmt::Const {
                 names,
                 types,
                 values,
+                line,
             } => {
                 for (index, name) in names.iter().enumerate() {
                     let actual = values
@@ -185,7 +187,7 @@ impl Checker {
                                     name,
                                     expected.display()
                                 ),
-                                1,
+                                *line,
                             );
                         }
                         env.insert(name.clone(), expected);
