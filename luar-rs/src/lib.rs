@@ -290,10 +290,11 @@ pub fn analyze_source_with_options(
         .as_deref()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "<stdin>".to_string());
-    let source = include::expand_source(source, options.source_path.as_deref(), options.target)
+    let expanded = include::expand_source(source, options.source_path.as_deref(), options.target)
         .map_err(|error| vec![diagnostic_from_message(&file, &error)])?;
-    let mut parser = parser::Parser::new(&source).map_err(|error| {
-        vec![diagnostic_with_span(
+    let mut parser = parser::Parser::new(&expanded.source).map_err(|error| {
+        vec![diagnostic_from_expanded(
+            &expanded,
             &file,
             error.span,
             Severity::Error,
@@ -301,7 +302,8 @@ pub fn analyze_source_with_options(
         )]
     })?;
     let mut program = parser.parse().map_err(|error| {
-        vec![diagnostic_with_span(
+        vec![diagnostic_from_expanded(
+            &expanded,
             &file,
             error.span,
             Severity::Error,
@@ -356,22 +358,38 @@ pub fn analyze_source_with_options(
 
     let resolver_errors =
         resolver::Resolver::new(definitions, options.target).resolve(&mut program);
-    errors.extend(
-        resolver_errors
-            .into_iter()
-            .map(|error| diagnostic_with_span(&file, error.span, error.severity, error.message)),
-    );
+    errors.extend(resolver_errors.into_iter().map(|error| {
+        diagnostic_from_expanded(&expanded, &file, error.span, error.severity, error.message)
+    }));
     let checker_errors = checker::Checker::new().check(&mut program);
-    errors.extend(
-        checker_errors
-            .into_iter()
-            .map(|error| diagnostic(&file, error.line.max(1), error.message)),
-    );
-    errors.extend(
-        control_flow::validate(&program)
-            .into_iter()
-            .map(|error| diagnostic(&file, error.line.max(1), error.message)),
-    );
+    errors.extend(checker_errors.into_iter().map(|error| {
+        diagnostic_from_expanded(
+            &expanded,
+            &file,
+            SourceSpan {
+                line: error.line.max(1),
+                column: 1,
+                end_line: error.line.max(1),
+                end_column: 2,
+            },
+            Severity::Error,
+            error.message,
+        )
+    }));
+    errors.extend(control_flow::validate(&program).into_iter().map(|error| {
+        diagnostic_from_expanded(
+            &expanded,
+            &file,
+            SourceSpan {
+                line: error.line.max(1),
+                column: 1,
+                end_line: error.line.max(1),
+                end_column: 2,
+            },
+            Severity::Error,
+            error.message,
+        )
+    }));
     if options.target == Target::Luau {
         errors.extend(validate_luau_label_layout(&program, &file));
     }
@@ -422,6 +440,17 @@ fn diagnostic_with_span(
         severity,
         message,
     }
+}
+
+fn diagnostic_from_expanded(
+    expanded: &include::ExpandedSource,
+    fallback_file: &str,
+    span: SourceSpan,
+    severity: Severity,
+    message: String,
+) -> Diagnostic {
+    let (file, span) = expanded.remap_span(span, fallback_file);
+    diagnostic_with_span(&file, span, severity, message)
 }
 
 fn diagnostic_from_message(default_file: &str, message: &str) -> Diagnostic {

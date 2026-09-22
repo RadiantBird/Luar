@@ -1,4 +1,4 @@
-use luar_rs::compile_source;
+use luar_rs::{CompileOptions, Severity, Target, analyze_source_with_options, compile_source};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -123,6 +123,35 @@ fn globals_unknown_names_and_qualified_names_remain_unqualified() {
     .unwrap();
     assert!(output.contains("print(engine.value, workspace, unknownGlobal)"));
     assert!(!output.contains("engine.workspace"));
+}
+
+#[test]
+fn diagnostics_after_include_use_the_original_main_source_line() {
+    let project = TempProject::new();
+    project.source(
+        "colors.luar",
+        "local colors = {}\ncolors.background = { 0, 0, 0 }\nreturn colors\n",
+    );
+    let main = project.source_path();
+    let analysis = analyze_source_with_options(
+        "local colors = !include(\"./colors.luar\")\nlovve.graphics.print(colors.background)",
+        &CompileOptions {
+            target: Target::Luau,
+            source_path: Some(main.clone()),
+        },
+    )
+    .expect("unknown globals are warnings, not errors");
+
+    let warning = analysis
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.message.contains("unknown global 'lovve'"))
+        .expect("unknown global warning");
+    assert_eq!(warning.severity, Severity::Warning);
+    assert_eq!(warning.file, main.display().to_string());
+    assert_eq!(warning.line, 2);
+    assert_eq!(warning.column, 1);
+    assert_eq!(warning.end_column, 6);
 }
 
 #[test]

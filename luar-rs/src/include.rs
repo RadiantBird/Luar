@@ -1,6 +1,38 @@
 use crate::Target;
+use crate::lexer::SourceSpan;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone)]
+pub struct SourceOrigin {
+    pub file: String,
+    pub line: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExpandedSource {
+    pub source: String,
+    /// One origin per generated source line. This lets diagnostics refer back
+    /// to a source file before `!include` changed the line layout.
+    pub origins: Vec<SourceOrigin>,
+}
+
+impl ExpandedSource {
+    pub fn remap_span(&self, span: SourceSpan, fallback_file: &str) -> (String, SourceSpan) {
+        let Some(start) = self.origins.get(span.line.saturating_sub(1)) else {
+            return (fallback_file.to_string(), span);
+        };
+        let mut mapped = span;
+        mapped.line = start.line;
+        mapped.end_line = self
+            .origins
+            .get(span.end_line.saturating_sub(1))
+            .filter(|end| end.file == start.file)
+            .map(|end| end.line)
+            .unwrap_or(start.line);
+        (start.file.clone(), mapped)
+    }
+}
 
 /// Expands `local name = !include("path")` declarations before lexing.
 ///
@@ -12,14 +44,24 @@ pub fn expand_source(
     source: &str,
     source_path: Option<&Path>,
     target: Target,
-) -> Result<String, String> {
+) -> Result<ExpandedSource, String> {
     let Some(source_path) = source_path else {
         if find_include_declaration(source).is_some() {
             return Err(
                 "!include declarations require compile_source with a source file path".to_string(),
             );
         }
-        return Ok(source.to_string());
+        return Ok(ExpandedSource {
+            source: source.to_string(),
+            origins: source
+                .lines()
+                .enumerate()
+                .map(|(index, _)| SourceOrigin {
+                    file: "<stdin>".to_string(),
+                    line: index + 1,
+                })
+                .collect(),
+        });
     };
     if source_path.as_os_str().is_empty() && find_include_declaration(source).is_some() {
         return Err("!include declarations require a non-empty source file path".to_string());
@@ -34,14 +76,20 @@ fn expand_with_path(
     source_path: &Path,
     target: Target,
     stack: &mut Vec<PathBuf>,
-) -> Result<String, String> {
+) -> Result<ExpandedSource, String> {
     let directory = source_path.parent().unwrap_or_else(|| Path::new(""));
-    let mut output: Vec<String> = Vec::new();
+    let mut output: Vec<(String, SourceOrigin)> = Vec::new();
 
     for (index, line) in source.lines().enumerate() {
         let line_number = index + 1;
         let Some(declaration) = parse_include_declaration(line) else {
-            output.push(line.to_string());
+            output.push((
+                line.to_string(),
+                SourceOrigin {
+                    file: source_path.display().to_string(),
+                    line: line_number,
+                },
+            ));
             continue;
         };
 
@@ -128,22 +176,47 @@ fn expand_with_path(
         let expanded_body = expanded_body?;
 
         if extension == Some("lua") && target == Target::Lua54 {
-            output.push(raw_lua_marker(&expanded_body));
+            output.push((
+                raw_lua_marker(&expanded_body.source),
+                SourceOrigin {
+                    file: source_path.display().to_string(),
+                    line: line_number,
+                },
+            ));
         } else {
             if extension == Some("lua") {
-                reject_luau_incompatible_lua(&expanded_body, source_path, line_number)?;
+                reject_luau_incompatible_lua(&expanded_body.source, source_path, line_number)?;
             }
-            output.push(expanded_body);
+            output.extend(
+                expanded_body
+                    .source
+                    .lines()
+                    .zip(expanded_body.origins)
+                    .map(|(line, origin)| (line.to_string(), origin)),
+            );
         }
         if returned_name != declaration.name {
-            output.push(format!(
-                "{} {} = {}",
-                declaration.binding, declaration.name, returned_name
+            output.push((
+                format!(
+                    "{} {} = {}",
+                    declaration.binding, declaration.name, returned_name
+                ),
+                SourceOrigin {
+                    file: source_path.display().to_string(),
+                    line: line_number,
+                },
             ));
         }
     }
 
-    Ok(output.join("\n"))
+    Ok(ExpandedSource {
+        source: output
+            .iter()
+            .map(|(line, _)| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        origins: output.into_iter().map(|(_, origin)| origin).collect(),
+    })
 }
 
 fn raw_lua_marker(source: &str) -> String {
@@ -256,7 +329,9 @@ fn remove_terminal_return(source: &str, source_path: &Path) -> Result<(String, S
             return_index + 1
         ));
     };
-    lines.remove(return_index);
+    // Keep the blank line so the remaining source retains its original line
+    // numbers for the include source map.
+    lines[return_index] = "";
     Ok((lines.join("\n"), returned_name.to_string()))
 }
 
