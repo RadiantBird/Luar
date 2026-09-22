@@ -126,7 +126,12 @@ impl Validator {
                 Stmt::Do { body } => self.walk_child(body, locals, loop_depth),
                 Stmt::While { cond, body } => {
                     self.walk_expr(cond);
-                    self.walk_child(body, locals, loop_depth + 1);
+                    let mut child = locals.clone();
+                    if matches!(cond, Expr::Bind { .. }) {
+                        let id = self.local();
+                        child.insert(id);
+                    }
+                    self.walk_block(body, &mut child, loop_depth + 1);
                 }
                 Stmt::Repeat { body, cond } => {
                     let mut child = locals.clone();
@@ -136,7 +141,12 @@ impl Validator {
                 Stmt::If { clauses, else_body } => {
                     for clause in clauses {
                         self.walk_expr(&clause.cond);
-                        self.walk_child(&clause.body, locals, loop_depth);
+                        let mut child = locals.clone();
+                        if matches!(clause.cond, Expr::Bind { .. }) {
+                            let id = self.local();
+                            child.insert(id);
+                        }
+                        self.walk_block(&clause.body, &mut child, loop_depth);
                     }
                     if let Some(body) = else_body {
                         self.walk_child(body, locals, loop_depth);
@@ -274,6 +284,22 @@ impl Validator {
                 self.walk_expr(left);
                 self.walk_expr(right);
             }
+            Expr::If(if_expr) => {
+                for clause in &if_expr.clauses {
+                    self.walk_expr(&clause.cond);
+                    let mut locals = HashSet::new();
+                    if matches!(clause.cond, Expr::Bind { .. }) {
+                        let id = self.local();
+                        locals.insert(id);
+                    }
+                    self.walk_block(&clause.branch.statements, &mut locals, 0);
+                    self.walk_expr(&clause.branch.result);
+                }
+                let mut locals = HashSet::new();
+                self.walk_block(&if_expr.else_branch.statements, &mut locals, 0);
+                self.walk_expr(&if_expr.else_branch.result);
+            }
+            Expr::Bind { value, .. } => self.walk_expr(value),
             Expr::Table(fields) => {
                 for field in fields {
                     match field {

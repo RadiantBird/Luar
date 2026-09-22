@@ -517,8 +517,77 @@ fn convert_raw_lua_markers(stmts: &mut [ast::Stmt]) {
                     }
                 }
             }
+            Stmt::Local { values, .. }
+            | Stmt::Const { values, .. }
+            | Stmt::Assign { values, .. }
+            | Stmt::Return(values) => {
+                for value in values {
+                    convert_raw_lua_markers_expr(value);
+                }
+            }
+            Stmt::ExprStmt(expr) => convert_raw_lua_markers_expr(expr),
             _ => {}
         }
+    }
+}
+
+fn convert_raw_lua_markers_expr(expr: &mut ast::Expr) {
+    match expr {
+        ast::Expr::If(if_expr) => {
+            for clause in &mut if_expr.clauses {
+                convert_raw_lua_markers(&mut clause.branch.statements);
+                convert_raw_lua_markers_expr(&mut clause.cond);
+                convert_raw_lua_markers_expr(&mut clause.branch.result);
+            }
+            convert_raw_lua_markers(&mut if_expr.else_branch.statements);
+            convert_raw_lua_markers_expr(&mut if_expr.else_branch.result);
+        }
+        ast::Expr::Bind { value, .. } => convert_raw_lua_markers_expr(value),
+        ast::Expr::Function { body, .. } => convert_raw_lua_markers(body),
+        ast::Expr::InterpolatedString(parts) => {
+            for part in parts {
+                if let ast::InterpolatedPart::Expr(expr) = part {
+                    convert_raw_lua_markers_expr(expr);
+                }
+            }
+        }
+        ast::Expr::Field { obj, .. } | ast::Expr::Unop { expr: obj, .. } => {
+            convert_raw_lua_markers_expr(obj)
+        }
+        ast::Expr::Index { obj, key } => {
+            convert_raw_lua_markers_expr(obj);
+            convert_raw_lua_markers_expr(key);
+        }
+        ast::Expr::Call { callee, args } => {
+            convert_raw_lua_markers_expr(callee);
+            for arg in args {
+                convert_raw_lua_markers_expr(arg);
+            }
+        }
+        ast::Expr::MethodCall { obj, args, .. } => {
+            convert_raw_lua_markers_expr(obj);
+            for arg in args {
+                convert_raw_lua_markers_expr(arg);
+            }
+        }
+        ast::Expr::Binop { left, right, .. } => {
+            convert_raw_lua_markers_expr(left);
+            convert_raw_lua_markers_expr(right);
+        }
+        ast::Expr::Table(fields) => {
+            for field in fields {
+                match field {
+                    ast::TableField::Index { key, value } => {
+                        convert_raw_lua_markers_expr(key);
+                        convert_raw_lua_markers_expr(value);
+                    }
+                    ast::TableField::Name { value, .. } | ast::TableField::Value(value) => {
+                        convert_raw_lua_markers_expr(value)
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -526,6 +595,16 @@ fn validate_luau_label_layout(program: &ast::Program, file: &str) -> Vec<Diagnos
     fn walk_expr(expr: &ast::Expr, file: &str, errors: &mut Vec<Diagnostic>) {
         match expr {
             ast::Expr::Function { body, .. } => walk(body, false, file, errors),
+            ast::Expr::If(if_expr) => {
+                for clause in &if_expr.clauses {
+                    walk_expr(&clause.cond, file, errors);
+                    walk(&clause.branch.statements, true, file, errors);
+                    walk_expr(&clause.branch.result, file, errors);
+                }
+                walk(&if_expr.else_branch.statements, true, file, errors);
+                walk_expr(&if_expr.else_branch.result, file, errors);
+            }
+            ast::Expr::Bind { value, .. } => walk_expr(value, file, errors),
             ast::Expr::InterpolatedString(parts) => {
                 for part in parts {
                     if let ast::InterpolatedPart::Expr(expr) = part {

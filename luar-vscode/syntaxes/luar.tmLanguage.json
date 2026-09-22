@@ -13,6 +13,7 @@
     { "include": "#const-decl" },
     { "include": "#import-decl" },
     { "include": "#declare-decl" },
+    { "include": "#binding-operator" },
     { "include": "#function-decl" },
     { "include": "#class-decl" },
     { "include": "#label" },
@@ -98,6 +99,11 @@
         "2": { "name": "storage.modifier.global.luar" },
         "3": { "name": "variable.other.readwrite.luar" }
       }
+    },
+    "binding-operator": {
+      "comment": "condition-only local binding operator",
+      "match": ":=",
+      "name": "keyword.operator.binding.luar"
     },
     "function-decl": {
       "patterns": [

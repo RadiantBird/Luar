@@ -55,6 +55,7 @@ pub enum TokenKind {
     Dot,
     Comma,
     Colon,
+    Bind,
     DoubleColon,
     Semicolon,
     Arrow,
@@ -337,6 +338,9 @@ impl Lexer {
                 if self.peek() == ':' {
                     self.advance();
                     TokenKind::DoubleColon
+                } else if self.peek() == '=' {
+                    self.advance();
+                    TokenKind::Bind
                 } else {
                     TokenKind::Colon
                 }

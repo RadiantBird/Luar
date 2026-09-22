@@ -81,6 +81,52 @@ luar dump-ir main.luar
 
 `luar-rs`が唯一の正式なコンパイラ実装である。`luar/`以下のTypeScript frontendはVS Codeの寛容な編集中インデックスと互換テストのために残されているが、CLIおよびcodegenとしては非推奨である。
 
+## ブロックif式
+
+`if`は式としても使用できる。各branchには0個以上の文を書け、最後の値式がそのbranchの値になる。値を必ず生成するため、`else`は必須である。
+
+```lua
+local x = if cond then
+    print("working")
+    123
+elseif other then
+    prepare()
+    456
+else
+    789
+end
+```
+
+短い形式や、関数引数・二項演算子・`return`の中でも使用できる。
+
+```lua
+local short = if enabled then 1 else 0 end
+foo(if enabled then 20 else 30 end)
+return 100 + if enabled then calculate() 1 else 2 end
+```
+
+branch末尾の関数呼び出しは副作用を持つ文として扱われるため、値を返す場合も最後に値式を置く。例えば`print("debug")`の後に`1`を置く。branchの値型は既存の型検査で比較され、`number`と`string`など互換性のない組み合わせはエラーになる。Luauでは文を含まない単純なif式をnative if expressionへ出力し、それ以外とLua 5.4ではtemporaryとif文へloweringする。`a`が`false`や`nil`でも意味を壊す`a and b or c`への変換は行わない。
+
+## 条件付きbinding（`:=`）
+
+`if`、`elseif`、`while`の条件では、bare identifierに`:=`を使って値を一度だけ評価し、新しいlocalへ束縛できます。
+
+```lua
+if child := parent:FindChild("ABCD") then
+    print(child.Name)
+elseif fallback := getFallback() then
+    print(fallback)
+end
+
+while line := file:ReadLine() do
+    print(line)
+end
+```
+
+bindingは条件のtruthy branchと`while`本体でだけ有効です。`else`、後続の`elseif`条件、`if`の後へは漏れず、外側に同名のlocalがあれば内側でシャドーイングします。`nil`と`false`は偽、`0`と空文字列は真というLua/Luauのtruthinessに従います。`:=`の右辺は各条件評価につき一度だけ実行されます。
+
+`:=`は通常の式では使えず、左辺は単一の識別子に限られます。`object.field := value`、`print(x := value)`などはコンパイルエラーです。optional型の値はtruthy branchで既存の型refinementが適用されます。backendではLuau/Lua 5.4とも、必要な`do`・temporary・`break`へloweringし、`:=`自体は出力しません。
+
 ## gotoとcontinue
 
 LuarではLua互換のlabelと`goto`を使用できる。

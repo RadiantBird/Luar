@@ -24,7 +24,8 @@ export type Expr =
   | { kind: "Unop"; op: string; expr: Expr }
   | { kind: "Binop"; op: string; left: Expr; right: Expr }
   | { kind: "Table"; fields: TableField[] }
-  | { kind: "Function"; params: Param[]; returnType: TypeExpr | null; body: Stmt[] };
+  | { kind: "Function"; params: Param[]; returnType: TypeExpr | null; body: Stmt[] }
+  | { kind: "Bind"; name: string; value: Expr };
 
 export type TableField =
   | { kind: "IndexField"; key: Expr; value: Expr }

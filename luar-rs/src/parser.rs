@@ -89,6 +89,13 @@ impl Parser {
         }
     }
 
+    fn error_at(&self, token: &Token, message: String) -> ParseError {
+        ParseError {
+            message,
+            span: token.span(),
+        }
+    }
+
     fn is_contextual(&self, value: &str) -> bool {
         matches!(self.peek_kind(), TokenKind::Ident) && self.peek().value == value
     }
@@ -347,7 +354,7 @@ impl Parser {
 
     fn parse_while(&mut self) -> Result<Stmt, ParseError> {
         self.eat(&TokenKind::While)?;
-        let cond = self.parse_expr()?;
+        let cond = self.parse_condition()?;
         self.eat(&TokenKind::Do)?;
         let body = self.parse_block(&[TokenKind::End])?;
         self.eat(&TokenKind::End)?;
@@ -365,12 +372,12 @@ impl Parser {
     fn parse_if(&mut self) -> Result<Stmt, ParseError> {
         self.eat(&TokenKind::If)?;
         let mut clauses = Vec::new();
-        let cond = self.parse_expr()?;
+        let cond = self.parse_condition()?;
         self.eat(&TokenKind::Then)?;
         let body = self.parse_block(&[TokenKind::Else, TokenKind::ElseIf, TokenKind::End])?;
         clauses.push(IfClause { cond, body });
         while self.match_tok(&TokenKind::ElseIf) {
-            let c = self.parse_expr()?;
+            let c = self.parse_condition()?;
             self.eat(&TokenKind::Then)?;
             let b = self.parse_block(&[TokenKind::Else, TokenKind::ElseIf, TokenKind::End])?;
             clauses.push(IfClause { cond: c, body: b });
@@ -383,6 +390,82 @@ impl Parser {
         };
         self.eat(&TokenKind::End)?;
         Ok(Stmt::If { clauses, else_body })
+    }
+
+    /// Parse the expression-only form of `if`.  Branches are parsed through
+    /// the ordinary statement parser first, then their final expression
+    /// statement is promoted to the branch value.  This keeps declarations,
+    /// calls, nested control flow, and future statements on the normal AST
+    /// path instead of introducing a second mini-language for branches.
+    fn parse_if_expr(&mut self) -> Result<Expr, ParseError> {
+        let span = self.eat(&TokenKind::If)?.span();
+        let first_cond = self.parse_condition()?;
+        self.eat(&TokenKind::Then)?;
+        let first_branch = self.parse_if_expr_branch()?;
+        let mut clauses = vec![IfExprClause {
+            cond: first_cond,
+            branch: first_branch,
+        }];
+
+        while self.match_tok(&TokenKind::ElseIf) {
+            let cond = self.parse_condition()?;
+            self.eat(&TokenKind::Then)?;
+            let branch = self.parse_if_expr_branch()?;
+            clauses.push(IfExprClause { cond, branch });
+        }
+
+        if !self.match_tok(&TokenKind::Else) {
+            return Err(self
+                .error("if expression requires an else branch that produces a value".to_string()));
+        }
+        let else_branch = self.parse_if_expr_branch()?;
+        self.eat(&TokenKind::End)?;
+
+        Ok(Expr::If(IfExpr {
+            clauses,
+            else_branch,
+            span,
+        }))
+    }
+
+    fn parse_if_expr_branch(&mut self) -> Result<IfExprBranch, ParseError> {
+        let mut body = Vec::new();
+        while !self.is_at_end()
+            && !matches!(
+                self.peek_kind(),
+                TokenKind::Else | TokenKind::ElseIf | TokenKind::End
+            )
+        {
+            // At statement position `if` normally means a statement.  A
+            // nested block-if used as the branch value is ambiguous, so try
+            // the expression form first and fall back to the statement form.
+            if matches!(self.peek_kind(), TokenKind::If) {
+                let saved = self.pos;
+                if let Ok(expr) = self.parse_if_expr() {
+                    body.push(Stmt::ExprStmt(expr));
+                    continue;
+                }
+                self.pos = saved;
+            }
+            if self.match_tok(&TokenKind::Semicolon) {
+                continue;
+            }
+            body.push(self.parse_stmt()?);
+        }
+        let Some(Stmt::ExprStmt(result)) = body.pop() else {
+            return Err(
+                self.error("if expression branch must end with a value expression".to_string())
+            );
+        };
+        if matches!(result, Expr::Call { .. } | Expr::MethodCall { .. }) {
+            return Err(self.error(
+                "if expression branch must end with a value expression (a call is a statement; add a value after it)".to_string(),
+            ));
+        }
+        Ok(IfExprBranch {
+            statements: body,
+            result: Box::new(result),
+        })
     }
 
     fn parse_for(&mut self) -> Result<Stmt, ParseError> {
@@ -700,7 +783,50 @@ impl Parser {
     // ─── Expressions ──────────────────────────────────────────────────────────
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        self.parse_binop(0)
+        let expr = self.parse_binop(0)?;
+        if matches!(self.peek_kind(), TokenKind::Bind) {
+            return Err(self.error(
+                "':=' is only allowed in conditional contexts (if, elseif, while)".to_string(),
+            ));
+        }
+        Ok(expr)
+    }
+
+    /// Parse the restricted condition grammar.  Binding conditions are
+    /// intentionally recognized here instead of as general expressions so
+    /// `print(x := value)` and `local y = x := value` remain invalid.
+    fn parse_condition(&mut self) -> Result<Expr, ParseError> {
+        if matches!(self.peek_kind(), TokenKind::Ident)
+            && matches!(self.peek_n_kind(1), TokenKind::Bind)
+        {
+            let name_token = self.advance().clone();
+            let bind_token = self.eat(&TokenKind::Bind)?.clone();
+            let value = self.parse_expr()?;
+            return Ok(Expr::Bind {
+                name: name_token.value,
+                value: Box::new(value),
+                span: bind_token.span(),
+            });
+        }
+
+        let expr = self.parse_binop(0)?;
+        if matches!(self.peek_kind(), TokenKind::Bind) {
+            return Err(self.error("left side of ':=' must be a bare identifier".to_string()));
+        }
+        if matches!(self.peek_kind(), TokenKind::Comma) {
+            for token in &self.tokens[self.pos..] {
+                if matches!(token.kind, TokenKind::Then | TokenKind::Do) {
+                    break;
+                }
+                if matches!(token.kind, TokenKind::Bind) {
+                    return Err(self.error_at(
+                        token,
+                        "left side of ':=' must be a single bare identifier".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(expr)
     }
 
     fn binop_prec(op: &str) -> Option<(u8, u8)> {
@@ -845,7 +971,9 @@ impl Parser {
                         args,
                     };
                 }
-                TokenKind::LuaString => {
+                TokenKind::LuaString
+                    if self.peek().line == self.tokens[self.pos.saturating_sub(1)].end_line =>
+                {
                     // f"string" call syntax
                     let s = self.advance().value.clone();
                     expr = Expr::Call {
@@ -853,7 +981,9 @@ impl Parser {
                         args: vec![Expr::Str(s)],
                     };
                 }
-                TokenKind::LBrace => {
+                TokenKind::LBrace
+                    if self.peek().line == self.tokens[self.pos.saturating_sub(1)].end_line =>
+                {
                     // f{} call syntax
                     let tbl = self.parse_table()?;
                     expr = Expr::Call {
@@ -950,6 +1080,7 @@ impl Parser {
                     body,
                 })
             }
+            TokenKind::If => self.parse_if_expr(),
             _ => {
                 let t = self.peek();
                 Err(self.error(format!(

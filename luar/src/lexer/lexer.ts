@@ -197,7 +197,9 @@ export class Lexer {
         }
         if (next === ".") { this.advance(); return tok("..", "..", line, col); }
         return tok(".", ch, line, col);
-      case ":": return tok(":", ch, line, col);
+      case ":":
+        if (next === "=") { this.advance(); return tok(":=", ":=", line, col); }
+        return tok(":", ch, line, col);
       case "?": return tok("?", ch, line, col);
     }
 

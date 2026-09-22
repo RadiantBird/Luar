@@ -118,7 +118,12 @@ impl Resolver {
             Stmt::Do { body } => self.visit_scoped_block(body),
             Stmt::While { cond, body } => {
                 self.visit_expr(cond);
-                self.visit_scoped_block(body);
+                self.push_scope();
+                if let Expr::Bind { name, .. } = cond {
+                    self.declare(name, false);
+                }
+                self.visit_stmts(body, false);
+                self.pop_scope();
             }
             Stmt::Repeat { body, cond } => {
                 self.push_scope();
@@ -129,7 +134,12 @@ impl Resolver {
             Stmt::If { clauses, else_body } => {
                 for clause in clauses {
                     self.visit_expr(&mut clause.cond);
-                    self.visit_scoped_block(&mut clause.body);
+                    self.push_scope();
+                    if let Expr::Bind { name, .. } = &clause.cond {
+                        self.declare(name, false);
+                    }
+                    self.visit_stmts(&mut clause.body, false);
+                    self.pop_scope();
                 }
                 if let Some(body) = else_body {
                     self.visit_scoped_block(body);
@@ -315,6 +325,21 @@ impl Resolver {
                     }
                 }
             }
+            Expr::If(if_expr) => {
+                for clause in &mut if_expr.clauses {
+                    self.visit_expr(&mut clause.cond);
+                    self.push_scope();
+                    if let Expr::Bind { name, .. } = &clause.cond {
+                        self.declare(name, false);
+                    }
+                    self.visit_stmts(&mut clause.branch.statements, false);
+                    self.visit_expr(&mut clause.branch.result);
+                    self.pop_scope();
+                }
+                self.visit_scoped_block(&mut if_expr.else_branch.statements);
+                self.visit_expr(&mut if_expr.else_branch.result);
+            }
+            Expr::Bind { value, .. } => self.visit_expr(value),
             Expr::Nil
             | Expr::True
             | Expr::False

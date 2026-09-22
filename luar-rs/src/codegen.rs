@@ -1,6 +1,6 @@
 use crate::Target;
 use crate::ast::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const OPERATOR_META: &[(&str, &str)] = &[
     ("==", "__eq"),
@@ -48,6 +48,12 @@ pub struct Codegen {
     next_generated_name: usize,
     continue_wrappers: Vec<Option<String>>,
     dispatcher: Option<(String, String)>,
+    reserved_names: HashSet<String>,
+}
+
+struct LoweredExpr {
+    prelude: Vec<String>,
+    expr: String,
 }
 
 impl Codegen {
@@ -66,6 +72,7 @@ impl Codegen {
             next_generated_name: 0,
             continue_wrappers: Vec::new(),
             dispatcher: None,
+            reserved_names: HashSet::new(),
         }
     }
 
@@ -74,6 +81,7 @@ impl Codegen {
         self.indent = 0;
         self.type_env = vec![HashMap::new()];
         self.registry = self.build_registry(program);
+        self.reserved_names = collect_program_names(program);
 
         self.emit_function_body(&program.stmts);
         self.out.join("\n")
@@ -248,9 +256,26 @@ impl Codegen {
     }
 
     fn generated_name(&mut self, suffix: &str) -> String {
-        let id = self.next_generated_name;
-        self.next_generated_name += 1;
-        format!("__luar_{suffix}_{id}")
+        loop {
+            let id = self.next_generated_name;
+            self.next_generated_name += 1;
+            let name = format!("__luar_{suffix}_{id}");
+            if self.reserved_names.insert(name.clone()) {
+                return name;
+            }
+        }
+    }
+
+    fn append_raw(&mut self, lines: Vec<String>) {
+        self.out.extend(lines);
+    }
+
+    fn current_line(&self, text: &str) -> String {
+        if text.is_empty() {
+            String::new()
+        } else {
+            format!("{}{text}", "    ".repeat(self.indent))
+        }
     }
 
     fn escape_string(value: &str) -> String {
@@ -337,51 +362,6 @@ impl Codegen {
         }
     }
 
-    fn emit_interpolated(&mut self, parts: &[InterpolatedPart]) -> String {
-        if self.target == Target::Luau {
-            let mut output = String::from("`");
-            for part in parts {
-                match part {
-                    InterpolatedPart::Literal(value) => {
-                        output.push_str(
-                            &value
-                                .replace('\\', "\\\\")
-                                .replace('`', "\\`")
-                                .replace('{', "\\{")
-                                .replace('}', "\\}"),
-                        );
-                    }
-                    InterpolatedPart::Expr(expr) => {
-                        output.push('{');
-                        output.push_str(&self.emit_expr(expr));
-                        output.push('}');
-                    }
-                }
-            }
-            output.push('`');
-            return output;
-        }
-
-        let mut values = Vec::new();
-        for part in parts {
-            match part {
-                InterpolatedPart::Literal(value) if !value.is_empty() => {
-                    values.push(format!("\"{}\"", Self::escape_string(value)));
-                }
-                InterpolatedPart::Expr(expr) => {
-                    let expression = self.emit_expr(expr);
-                    values.push(format!("tostring({expression})"));
-                }
-                InterpolatedPart::Literal(_) => {}
-            }
-        }
-        if values.is_empty() {
-            "\"\"".to_string()
-        } else {
-            format!("({})", values.join(" .. "))
-        }
-    }
-
     fn emit_loop_body(&mut self, body: &[Stmt]) {
         if self.target == Target::Lua54 && contains_continue(body) {
             let break_flag = self.generated_name("break");
@@ -409,17 +389,20 @@ impl Codegen {
 
     // ─── Statements ───────────────────────────────────────────────────────────
 
+    fn emit_expr_list(&mut self, expressions: &[Expr]) -> Vec<String> {
+        let references = expressions.iter().collect::<Vec<_>>();
+        let (prelude, values) = self.lower_expr_sequence(&references);
+        self.append_raw(prelude);
+        values
+    }
+
     fn emit_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::ClassDecl(d) => self.emit_class_decl(d),
             Stmt::Local { names, values, .. } => self.emit_local(names, values),
             Stmt::Const { names, values, .. } => {
                 let ns = names.join(", ");
-                let vs = values
-                    .iter()
-                    .map(|e| self.emit_expr(e))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let vs = self.emit_expr_list(values).join(", ");
                 if self.target == Target::Lua54 {
                     let attributed = names
                         .iter()
@@ -453,16 +436,8 @@ impl Codegen {
                 self.line("end");
             }
             Stmt::Assign { targets, values } => {
-                let ts = targets
-                    .iter()
-                    .map(|e| self.emit_expr(e))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let vs = values
-                    .iter()
-                    .map(|e| self.emit_expr(e))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let ts = self.emit_expr_list(targets).join(", ");
+                let vs = self.emit_expr_list(values).join(", ");
                 self.line(&format!("{ts} = {vs}"));
             }
             Stmt::Do { body } => {
@@ -476,39 +451,72 @@ impl Codegen {
                 self.line("end");
             }
             Stmt::While { cond, body } => {
-                let c = self.emit_expr(cond);
-                self.line(&format!("while {c} do"));
-                self.indented(|s| s.emit_loop_body(body));
-                self.line("end");
+                if let Expr::Bind { name, value, .. } = cond {
+                    self.line("while true do");
+                    self.indented(|s| {
+                        let value = s.emit_expr(value);
+                        s.line(&format!("local {name} = {value}"));
+                        s.line(&format!("if not {name} then break end"));
+                        s.emit_loop_body(body);
+                    });
+                    self.line("end");
+                } else if contains_if_expr(cond) {
+                    self.line("while true do");
+                    self.indented(|s| {
+                        let lowered = s.lower_expr(cond);
+                        s.append_raw(lowered.prelude);
+                        s.line(&format!("if not ({}) then break end", lowered.expr));
+                        s.emit_loop_body(body);
+                    });
+                    self.line("end");
+                } else {
+                    let c = self.emit_expr(cond);
+                    self.line(&format!("while {c} do"));
+                    self.indented(|s| s.emit_loop_body(body));
+                    self.line("end");
+                }
             }
             Stmt::Repeat { body, cond } => {
                 self.line("repeat");
                 self.indented(|s| s.emit_loop_body(body));
-                let c = self.emit_expr(cond);
-                self.line(&format!("until {c}"));
+                if contains_if_expr(cond) {
+                    let lowered = self.lower_expr(cond);
+                    self.append_raw(lowered.prelude);
+                    self.line(&format!("if {} then break end", lowered.expr));
+                    self.line("until true");
+                } else {
+                    let c = self.emit_expr(cond);
+                    self.line(&format!("until {c}"));
+                }
             }
             Stmt::If { clauses, else_body } => {
-                for (i, clause) in clauses.iter().enumerate() {
-                    let kw = if i == 0 { "if" } else { "elseif" };
-                    let c = self.emit_expr(&clause.cond);
-                    self.line(&format!("{kw} {c} then"));
-                    self.indented(|s| {
-                        for st in &clause.body {
-                            s.emit_stmt(st);
-                            s.emit_dispatch_guard();
-                        }
-                    });
+                if clauses.iter().any(|clause| {
+                    contains_if_expr(&clause.cond) || matches!(&clause.cond, Expr::Bind { .. })
+                }) {
+                    self.emit_if_statement_chain(clauses, else_body.as_deref(), 0);
+                } else {
+                    for (i, clause) in clauses.iter().enumerate() {
+                        let kw = if i == 0 { "if" } else { "elseif" };
+                        let c = self.emit_expr(&clause.cond);
+                        self.line(&format!("{kw} {c} then"));
+                        self.indented(|s| {
+                            for st in &clause.body {
+                                s.emit_stmt(st);
+                                s.emit_dispatch_guard();
+                            }
+                        });
+                    }
+                    if let Some(eb) = else_body {
+                        self.line("else");
+                        self.indented(|s| {
+                            for st in eb {
+                                s.emit_stmt(st);
+                                s.emit_dispatch_guard();
+                            }
+                        });
+                    }
+                    self.line("end");
                 }
-                if let Some(eb) = else_body {
-                    self.line("else");
-                    self.indented(|s| {
-                        for st in eb {
-                            s.emit_stmt(st);
-                            s.emit_dispatch_guard();
-                        }
-                    });
-                }
-                self.line("end");
             }
             Stmt::NumericFor {
                 name,
@@ -529,11 +537,7 @@ impl Codegen {
             }
             Stmt::GenericFor { names, iters, body } => {
                 let ns = names.join(", ");
-                let is = iters
-                    .iter()
-                    .map(|e| self.emit_expr(e))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let is = self.emit_expr_list(iters).join(", ");
                 self.line(&format!("for {ns} in {is} do"));
                 self.indented(|s| s.emit_loop_body(body));
                 self.line("end");
@@ -542,11 +546,7 @@ impl Codegen {
                 if vals.is_empty() {
                     self.line("return");
                 } else {
-                    let vs = vals
-                        .iter()
-                        .map(|e| self.emit_expr(e))
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                    let vs = self.emit_expr_list(vals).join(", ");
                     self.line(&format!("return {vs}"));
                 }
             }
@@ -593,6 +593,71 @@ impl Codegen {
         }
     }
 
+    fn emit_if_statement_chain(
+        &mut self,
+        clauses: &[IfClause],
+        else_body: Option<&[Stmt]>,
+        index: usize,
+    ) {
+        let clause = &clauses[index];
+        if let Expr::Bind { name, value, .. } = &clause.cond {
+            self.line("do");
+            self.indented(|this| {
+                let value = this.emit_expr(value);
+                this.line(&format!("local {name} = {value}"));
+                this.line(&format!("if {name} then"));
+                this.indented(|this| {
+                    for statement in &clause.body {
+                        this.emit_stmt(statement);
+                        this.emit_dispatch_guard();
+                    }
+                });
+                if index + 1 < clauses.len() {
+                    this.line("else");
+                    this.indented(|this| {
+                        this.emit_if_statement_chain(clauses, else_body, index + 1)
+                    });
+                } else if let Some(body) = else_body {
+                    this.line("else");
+                    this.indented(|this| {
+                        for statement in body {
+                            this.emit_stmt(statement);
+                            this.emit_dispatch_guard();
+                        }
+                    });
+                }
+                this.line("end");
+            });
+            self.line("end");
+            return;
+        }
+        let condition = self.lower_expr(&clause.cond);
+        self.append_raw(condition.prelude);
+        self.line(&format!(
+            "if {} then",
+            parenthesize_if_expr(&clause.cond, &condition.expr)
+        ));
+        self.indented(|this| {
+            for statement in &clause.body {
+                this.emit_stmt(statement);
+                this.emit_dispatch_guard();
+            }
+        });
+        if index + 1 < clauses.len() {
+            self.line("else");
+            self.indented(|this| this.emit_if_statement_chain(clauses, else_body, index + 1));
+        } else if let Some(body) = else_body {
+            self.line("else");
+            self.indented(|this| {
+                for statement in body {
+                    this.emit_stmt(statement);
+                    this.emit_dispatch_guard();
+                }
+            });
+        }
+        self.line("end");
+    }
+
     fn emit_local(&mut self, names: &[String], values: &[Expr]) {
         if names.len() == 1
             && values.len() == 1
@@ -612,11 +677,7 @@ impl Codegen {
         if values.is_empty() {
             self.line(&format!("local {ns}"));
         } else {
-            let vs = values
-                .iter()
-                .map(|e| self.emit_expr(e))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let vs = self.emit_expr_list(values).join(", ");
             self.line(&format!("local {ns} = {vs}"));
             if names.len() == 1 && values.len() == 1 {
                 if let Some(t) = self.resolve_type(&values[0]) {
@@ -931,36 +992,191 @@ impl Codegen {
 
     // ─── Expressions ──────────────────────────────────────────────────────────
 
-    fn emit_expr(&mut self, expr: &Expr) -> String {
-        match expr {
-            Expr::Nil => "nil".to_string(),
-            Expr::True => "true".to_string(),
-            Expr::False => "false".to_string(),
-            Expr::Number(v) => v.clone(),
-            Expr::Str(v) => {
-                format!("\"{}\"", Self::escape_string(v))
+    fn lower_expr_sequence(&mut self, expressions: &[&Expr]) -> (Vec<String>, Vec<String>) {
+        let lowered = expressions
+            .iter()
+            .map(|expr| self.lower_expr(expr))
+            .collect::<Vec<_>>();
+        let materialize =
+            expressions.len() > 1 && lowered.iter().any(|item| !item.prelude.is_empty());
+        let mut prelude = Vec::new();
+        let mut values = Vec::new();
+        for item in lowered {
+            prelude.extend(item.prelude);
+            if materialize {
+                let name = self.generated_name("expr");
+                prelude.push(self.current_line(&format!("local {name} = {}", item.expr)));
+                values.push(name);
+            } else {
+                values.push(item.expr);
             }
-            Expr::InterpolatedString(parts) => self.emit_interpolated(parts),
-            Expr::Vararg => "...".to_string(),
-            Expr::Ident { name: n, .. } => n.clone(),
-            Expr::SelfExpr => "self".to_string(),
-            Expr::SuperExpr => self.parent_name().unwrap_or_else(|| "nil".to_string()),
+        }
+        (prelude, values)
+    }
+
+    fn lower_if_expr(&mut self, if_expr: &IfExpr) -> LoweredExpr {
+        // Luau can keep the compact form when no branch has statements.  We
+        // deliberately keep nested IfExpr out of this fast path so a nested
+        // lowering never needs to move code across the surrounding branch.
+        if self.target == Target::Luau && is_simple_native_if(if_expr) {
+            let mut pieces = Vec::new();
+            for (index, clause) in if_expr.clauses.iter().enumerate() {
+                let condition = self.lower_expr(&clause.cond);
+                let result = self.lower_expr(&clause.branch.result);
+                let keyword = if index == 0 { "if" } else { "elseif" };
+                pieces.push(format!("{keyword} {} then {}", condition.expr, result.expr));
+            }
+            let else_result = self.lower_expr(&if_expr.else_branch.result);
+            pieces.push(format!("else {}", else_result.expr));
+            return LoweredExpr {
+                prelude: Vec::new(),
+                expr: pieces.join(" "),
+            };
+        }
+
+        // A block-valued expression is lowered to a statement sequence.  The
+        // capture is important: when the expression occurs in an argument or
+        // binary expression, its statements must be returned to the enclosing
+        // statement before the final expression is emitted.
+        let saved = std::mem::take(&mut self.out);
+        self.out = Vec::new();
+        let result_name = self.generated_name("if");
+        self.line(&format!("local {result_name}"));
+        self.emit_if_expr_chain(if_expr, 0, &result_name);
+        let prelude = std::mem::replace(&mut self.out, saved);
+        LoweredExpr {
+            prelude,
+            expr: result_name,
+        }
+    }
+
+    fn emit_if_expr_chain(&mut self, if_expr: &IfExpr, index: usize, result_name: &str) {
+        let clause = &if_expr.clauses[index];
+        if let Expr::Bind { name, value, .. } = &clause.cond {
+            self.line("do");
+            self.indented(|this| {
+                let value = this.emit_expr(value);
+                this.line(&format!("local {name} = {value}"));
+                this.line(&format!("if {name} then"));
+                this.indented(|this| this.emit_if_expr_branch(&clause.branch, result_name));
+                this.line("else");
+                this.indented(|this| {
+                    if index + 1 < if_expr.clauses.len() {
+                        this.emit_if_expr_chain(if_expr, index + 1, result_name);
+                    } else {
+                        this.emit_if_expr_branch(&if_expr.else_branch, result_name);
+                    }
+                });
+                this.line("end");
+            });
+            self.line("end");
+            return;
+        }
+        let condition = self.lower_expr(&clause.cond);
+        self.append_raw(condition.prelude);
+        self.line(&format!(
+            "if {} then",
+            parenthesize_if_expr(&clause.cond, &condition.expr)
+        ));
+        self.indented(|this| this.emit_if_expr_branch(&clause.branch, result_name));
+        self.line("else");
+        self.indented(|this| {
+            if index + 1 < if_expr.clauses.len() {
+                this.emit_if_expr_chain(if_expr, index + 1, result_name);
+            } else {
+                this.emit_if_expr_branch(&if_expr.else_branch, result_name);
+            }
+        });
+        self.line("end");
+    }
+
+    fn emit_if_expr_branch(&mut self, branch: &IfExprBranch, result_name: &str) {
+        self.push_scope();
+        for statement in &branch.statements {
+            self.emit_stmt(statement);
+            self.emit_dispatch_guard();
+        }
+        let result = self.lower_expr(&branch.result);
+        self.append_raw(result.prelude);
+        self.line(&format!("{result_name} = {}", result.expr));
+        self.pop_scope();
+    }
+
+    fn lower_expr(&mut self, expr: &Expr) -> LoweredExpr {
+        match expr {
+            Expr::Nil => LoweredExpr {
+                prelude: Vec::new(),
+                expr: "nil".to_string(),
+            },
+            Expr::True => LoweredExpr {
+                prelude: Vec::new(),
+                expr: "true".to_string(),
+            },
+            Expr::False => LoweredExpr {
+                prelude: Vec::new(),
+                expr: "false".to_string(),
+            },
+            Expr::Number(v) => LoweredExpr {
+                prelude: Vec::new(),
+                expr: v.clone(),
+            },
+            Expr::Str(v) => LoweredExpr {
+                prelude: Vec::new(),
+                expr: format!("\"{}\"", Self::escape_string(v)),
+            },
+            Expr::InterpolatedString(parts) => self.lower_interpolated(parts),
+            Expr::Vararg => LoweredExpr {
+                prelude: Vec::new(),
+                expr: "...".to_string(),
+            },
+            Expr::Ident { name: n, .. } => LoweredExpr {
+                prelude: Vec::new(),
+                expr: n.clone(),
+            },
+            Expr::SelfExpr => LoweredExpr {
+                prelude: Vec::new(),
+                expr: "self".to_string(),
+            },
+            Expr::SuperExpr => LoweredExpr {
+                prelude: Vec::new(),
+                expr: self.parent_name().unwrap_or_else(|| "nil".to_string()),
+            },
             Expr::Field { obj, name } => {
                 if matches!(obj.as_ref(), Expr::SuperExpr) {
                     let parent = self.parent_name().unwrap_or_else(|| "nil".to_string());
-                    return format!("{parent}.{name}");
+                    return LoweredExpr {
+                        prelude: Vec::new(),
+                        expr: format!("{parent}.{name}"),
+                    };
                 }
-                let o = self.emit_expr(obj);
-                format!("{o}.{name}")
+                let (prelude, values) = self.lower_expr_sequence(&[obj.as_ref()]);
+                LoweredExpr {
+                    prelude,
+                    expr: format!("{}.{name}", parenthesize_if_expr(obj, &values[0])),
+                }
             }
             Expr::Index { obj, key } => {
-                let o = self.emit_expr(obj);
-                let k = self.emit_expr(key);
-                format!("{o}[{k}]")
+                let (prelude, values) = self.lower_expr_sequence(&[obj.as_ref(), key.as_ref()]);
+                LoweredExpr {
+                    prelude,
+                    expr: format!(
+                        "{}[{}]",
+                        parenthesize_if_expr(obj, &values[0]),
+                        parenthesize_if_expr(key, &values[1])
+                    ),
+                }
             }
             Expr::Call { callee, args } => {
-                let arg_strs: Vec<_> = args.iter().map(|a| self.emit_expr(a)).collect();
-                let args_str = arg_strs.join(", ");
+                let mut children = vec![callee.as_ref()];
+                children.extend(args.iter());
+                let (prelude, values) = self.lower_expr_sequence(&children);
+                let callee_str = parenthesize_if_expr(callee, &values[0]);
+                let args_str = args
+                    .iter()
+                    .zip(&values[1..])
+                    .map(|(arg, value)| parenthesize_if_expr(arg, value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 if let Expr::Field { obj, name } = callee.as_ref() {
                     // super.method(args) → ParentName.method(self, args)
                     if matches!(obj.as_ref(), Expr::SuperExpr) {
@@ -970,9 +1186,12 @@ impl Codegen {
                         } else {
                             format!("self, {args_str}")
                         };
-                        return format!("{parent}.{name}({all_args})");
+                        return LoweredExpr {
+                            prelude,
+                            expr: format!("{parent}.{name}({all_args})"),
+                        };
                     }
-                    let receiver = self.emit_expr(obj);
+                    let receiver = self.lower_expr(obj).expr;
                     if let Expr::Ident {
                         name: class_name, ..
                     } = obj.as_ref()
@@ -981,7 +1200,10 @@ impl Codegen {
                             if let Some(call) =
                                 self.private_method_call(class_name, name, &receiver, &args_str)
                             {
-                                return call;
+                                return LoweredExpr {
+                                    prelude,
+                                    expr: call,
+                                };
                             }
                         }
                     }
@@ -991,64 +1213,115 @@ impl Codegen {
                         if let Some(call) =
                             self.private_method_call(&class_name, name, &receiver, &args_str)
                         {
-                            return call;
+                            return LoweredExpr {
+                                prelude,
+                                expr: call,
+                            };
                         }
                         if let Some(method) = self.lookup_method(&class_name, name) {
                             if matches!(method.kind, MethodKind::Instance) {
-                                return format!("{receiver}:{name}({args_str})");
+                                return LoweredExpr {
+                                    prelude,
+                                    expr: format!("{receiver}:{name}({args_str})"),
+                                };
                             }
                         }
                     }
                 }
-                let callee_str = self.emit_expr(callee);
-                format!("{callee_str}({args_str})")
+                LoweredExpr {
+                    prelude,
+                    expr: format!("{callee_str}({args_str})"),
+                }
             }
             Expr::MethodCall { obj, method, args } => {
-                let o = self.emit_expr(obj);
+                let mut children = vec![obj.as_ref()];
+                children.extend(args.iter());
+                let (prelude, values) = self.lower_expr_sequence(&children);
+                let o = parenthesize_if_expr(obj, &values[0]);
                 let args_str = args
                     .iter()
-                    .map(|a| self.emit_expr(a))
+                    .zip(&values[1..])
+                    .map(|(arg, value)| parenthesize_if_expr(arg, value))
                     .collect::<Vec<_>>()
                     .join(", ");
                 if let Some(class_name) = self.resolve_type(obj) {
                     if let Some(call) = self.private_method_call(&class_name, method, &o, &args_str)
                     {
-                        return call;
+                        return LoweredExpr {
+                            prelude,
+                            expr: call,
+                        };
                     }
                 }
-                format!("{o}:{method}({args_str})")
+                LoweredExpr {
+                    prelude,
+                    expr: format!("{o}:{method}({args_str})"),
+                }
             }
             Expr::Unop { op, expr } => {
-                let e = self.emit_expr(expr);
-                format!("{op} {e}")
+                let (prelude, values) = self.lower_expr_sequence(&[expr.as_ref()]);
+                LoweredExpr {
+                    prelude,
+                    expr: format!("{op} {}", parenthesize_if_expr(expr, &values[0])),
+                }
             }
             Expr::Binop {
                 op, left, right, ..
             } => {
-                let l = self.emit_expr(left);
-                let r = self.emit_expr(right);
-                format!("{l} {op} {r}")
+                let (prelude, values) = self.lower_expr_sequence(&[left.as_ref(), right.as_ref()]);
+                LoweredExpr {
+                    prelude,
+                    expr: format!(
+                        "{} {op} {}",
+                        parenthesize_if_expr(left, &values[0]),
+                        parenthesize_if_expr(right, &values[1])
+                    ),
+                }
             }
             Expr::Table(fields) => {
                 if fields.is_empty() {
-                    return "{}".to_string();
+                    return LoweredExpr {
+                        prelude: Vec::new(),
+                        expr: "{}".to_string(),
+                    };
                 }
-                let parts: Vec<_> = fields
-                    .iter()
-                    .map(|f| match f {
+                let mut children = Vec::new();
+                for field in fields {
+                    match field {
                         TableField::Index { key, value } => {
-                            let k = self.emit_expr(key);
-                            let v = self.emit_expr(value);
-                            format!("[{k}] = {v}")
+                            children.push(key);
+                            children.push(value);
                         }
-                        TableField::Name { name, value } => {
-                            let v = self.emit_expr(value);
-                            format!("{name} = {v}")
+                        TableField::Name { value, .. } | TableField::Value(value) => {
+                            children.push(value);
                         }
-                        TableField::Value(e) => self.emit_expr(e),
-                    })
-                    .collect();
-                format!("{{ {} }}", parts.join(", "))
+                    }
+                }
+                let (prelude, values) = self.lower_expr_sequence(&children);
+                let mut value_index = 0;
+                let mut parts = Vec::new();
+                for field in fields {
+                    match field {
+                        TableField::Index { .. } => {
+                            let key = &values[value_index];
+                            let value = &values[value_index + 1];
+                            value_index += 2;
+                            parts.push(format!("[{key}] = {value}"));
+                        }
+                        TableField::Name { name, .. } => {
+                            parts.push(format!("{name} = {}", values[value_index]));
+                            value_index += 1;
+                        }
+                        TableField::Value(_) => {
+                            parts.push(values[value_index].clone());
+                            value_index += 1;
+                        }
+                    }
+                }
+                LoweredExpr {
+                    prelude,
+                    expr: format!("{{ {} }}", parts.join(", ")),
+                }
             }
             Expr::Function { params, body, .. } => {
                 // inline function: capture output at current indent
@@ -1061,12 +1334,412 @@ impl Codegen {
                 self.indent -= 1;
                 let body_str = body_lines.join("\n");
                 let ps = Self::emit_params_vec(params);
-                format!(
-                    "function({ps})\n{body_str}\n{}end",
-                    "    ".repeat(self.indent)
-                )
+                LoweredExpr {
+                    prelude: Vec::new(),
+                    expr: format!(
+                        "function({ps})\n{body_str}\n{}end",
+                        "    ".repeat(self.indent)
+                    ),
+                }
+            }
+            Expr::If(if_expr) => self.lower_if_expr(if_expr),
+            Expr::Bind { name, .. } => LoweredExpr {
+                prelude: Vec::new(),
+                expr: name.clone(),
+            },
+        }
+    }
+
+    fn lower_interpolated(&mut self, parts: &[InterpolatedPart]) -> LoweredExpr {
+        let expressions = parts
+            .iter()
+            .filter_map(|part| match part {
+                InterpolatedPart::Expr(expr) => Some(expr),
+                InterpolatedPart::Literal(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let (prelude, values) = self.lower_expr_sequence(&expressions);
+        let mut value_index = 0;
+        if self.target == Target::Luau {
+            let mut output = String::from("`");
+            for part in parts {
+                match part {
+                    InterpolatedPart::Literal(value) => output.push_str(
+                        &value
+                            .replace('\\', "\\\\")
+                            .replace('`', "\\`")
+                            .replace('{', "\\{")
+                            .replace('}', "\\}"),
+                    ),
+                    InterpolatedPart::Expr(_) => {
+                        output.push('{');
+                        output.push_str(&values[value_index]);
+                        output.push('}');
+                        value_index += 1;
+                    }
+                }
+            }
+            output.push('`');
+            return LoweredExpr {
+                prelude,
+                expr: output,
+            };
+        }
+
+        let mut parts_out = Vec::new();
+        for part in parts {
+            match part {
+                InterpolatedPart::Literal(value) if !value.is_empty() => {
+                    parts_out.push(format!("\"{}\"", Self::escape_string(value)));
+                }
+                InterpolatedPart::Expr(_) => {
+                    parts_out.push(format!("tostring({})", values[value_index]));
+                    value_index += 1;
+                }
+                InterpolatedPart::Literal(_) => {}
             }
         }
+        LoweredExpr {
+            prelude,
+            expr: if parts_out.is_empty() {
+                "\"\"".to_string()
+            } else {
+                format!("({})", parts_out.join(" .. "))
+            },
+        }
+    }
+
+    fn emit_expr(&mut self, expr: &Expr) -> String {
+        let lowered = self.lower_expr(expr);
+        self.append_raw(lowered.prelude);
+        lowered.expr
+    }
+}
+
+fn is_simple_native_if(if_expr: &IfExpr) -> bool {
+    if_expr.clauses.iter().all(|clause| {
+        clause.branch.statements.is_empty()
+            && !matches!(&clause.cond, Expr::Bind { .. })
+            && !contains_if_expr(&clause.cond)
+            && !contains_if_expr(&clause.branch.result)
+    }) && if_expr.else_branch.statements.is_empty()
+        && !contains_if_expr(&if_expr.else_branch.result)
+}
+
+fn parenthesize_if_expr(original: &Expr, rendered: &str) -> String {
+    if matches!(original, Expr::If(_)) {
+        format!("({rendered})")
+    } else {
+        rendered.to_string()
+    }
+}
+
+fn contains_if_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::If(_) => true,
+        Expr::Field { obj, .. } | Expr::Unop { expr: obj, .. } => contains_if_expr(obj),
+        Expr::Index { obj, key } => contains_if_expr(obj) || contains_if_expr(key),
+        Expr::Call { callee, args } => {
+            contains_if_expr(callee) || args.iter().any(contains_if_expr)
+        }
+        Expr::MethodCall { obj, args, .. } => {
+            contains_if_expr(obj) || args.iter().any(contains_if_expr)
+        }
+        Expr::Binop { left, right, .. } => contains_if_expr(left) || contains_if_expr(right),
+        Expr::Table(fields) => fields.iter().any(|field| match field {
+            TableField::Index { key, value } => contains_if_expr(key) || contains_if_expr(value),
+            TableField::Name { value, .. } | TableField::Value(value) => contains_if_expr(value),
+        }),
+        Expr::Function { body, .. } => body.iter().any(stmt_contains_if_expr),
+        Expr::InterpolatedString(parts) => parts.iter().any(|part| match part {
+            InterpolatedPart::Literal(_) => false,
+            InterpolatedPart::Expr(expr) => contains_if_expr(expr),
+        }),
+        Expr::Bind { value, .. } => contains_if_expr(value),
+        Expr::Nil
+        | Expr::True
+        | Expr::False
+        | Expr::Number(_)
+        | Expr::Str(_)
+        | Expr::Vararg
+        | Expr::Ident { .. }
+        | Expr::SelfExpr
+        | Expr::SuperExpr => false,
+    }
+}
+
+fn stmt_contains_if_expr(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Local { values, .. } | Stmt::Const { values, .. } => {
+            values.iter().any(contains_if_expr)
+        }
+        Stmt::FunctionDecl { body, .. }
+        | Stmt::Do { body }
+        | Stmt::While { body, .. }
+        | Stmt::Repeat { body, .. }
+        | Stmt::NumericFor { body, .. }
+        | Stmt::GenericFor { body, .. } => body.iter().any(stmt_contains_if_expr),
+        Stmt::Assign { targets, values } => targets.iter().chain(values).any(contains_if_expr),
+        Stmt::If { clauses, else_body } => {
+            clauses.iter().any(|clause| {
+                contains_if_expr(&clause.cond) || clause.body.iter().any(stmt_contains_if_expr)
+            }) || else_body
+                .as_deref()
+                .is_some_and(|body| body.iter().any(stmt_contains_if_expr))
+        }
+        Stmt::Return(values) => values.iter().any(contains_if_expr),
+        Stmt::ExprStmt(expr) => contains_if_expr(expr),
+        Stmt::ClassDecl(class) => class
+            .top_level_members
+            .iter()
+            .chain(class.blocks.iter().flat_map(|block| block.members.iter()))
+            .any(|member| match member {
+                Member::Field(field) => field.value.as_ref().is_some_and(contains_if_expr),
+                Member::Method(method) => method
+                    .body
+                    .as_deref()
+                    .is_some_and(|body| body.iter().any(stmt_contains_if_expr)),
+            }),
+        _ => false,
+    }
+}
+
+fn collect_program_names(program: &Program) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for stmt in &program.stmts {
+        collect_stmt_names(stmt, &mut names);
+    }
+    names
+}
+
+fn collect_stmt_names(stmt: &Stmt, names: &mut HashSet<String>) {
+    match stmt {
+        Stmt::Local {
+            names: bindings,
+            values,
+            ..
+        }
+        | Stmt::Const {
+            names: bindings,
+            values,
+            ..
+        } => {
+            names.extend(bindings.iter().cloned());
+            for value in values {
+                collect_expr_names(value, names);
+            }
+        }
+        Stmt::FunctionDecl {
+            name, params, body, ..
+        } => {
+            names.insert(name.clone());
+            collect_param_names(params, names);
+            for statement in body {
+                collect_stmt_names(statement, names);
+            }
+        }
+        Stmt::Assign { targets, values } => {
+            for expr in targets.iter().chain(values) {
+                collect_expr_names(expr, names);
+            }
+        }
+        Stmt::Do { body: _ }
+        | Stmt::While { body: _, .. }
+        | Stmt::Repeat { body: _, .. }
+        | Stmt::NumericFor { body: _, .. }
+        | Stmt::GenericFor { body: _, .. } => {
+            match stmt {
+                Stmt::NumericFor { name, .. } => {
+                    names.insert(name.clone());
+                }
+                Stmt::GenericFor {
+                    names: bindings, ..
+                } => {
+                    names.extend(bindings.iter().cloned());
+                }
+                _ => {}
+            }
+            match stmt {
+                Stmt::While { cond, .. } | Stmt::Repeat { cond, .. } => {
+                    collect_expr_names(cond, names)
+                }
+                Stmt::NumericFor {
+                    start, limit, step, ..
+                } => {
+                    collect_expr_names(start, names);
+                    collect_expr_names(limit, names);
+                    if let Some(step) = step {
+                        collect_expr_names(step, names);
+                    }
+                }
+                Stmt::GenericFor { iters, .. } => {
+                    for iter in iters {
+                        collect_expr_names(iter, names);
+                    }
+                }
+                _ => {}
+            }
+            if let Stmt::Do { body }
+            | Stmt::While { body, .. }
+            | Stmt::Repeat { body, .. }
+            | Stmt::NumericFor { body, .. }
+            | Stmt::GenericFor { body, .. } = stmt
+            {
+                for statement in body {
+                    collect_stmt_names(statement, names);
+                }
+            }
+        }
+        Stmt::If { clauses, else_body } => {
+            for clause in clauses {
+                collect_expr_names(&clause.cond, names);
+                for statement in &clause.body {
+                    collect_stmt_names(statement, names);
+                }
+            }
+            if let Some(body) = else_body {
+                for statement in body {
+                    collect_stmt_names(statement, names);
+                }
+            }
+        }
+        Stmt::Return(values) => {
+            for value in values {
+                collect_expr_names(value, names);
+            }
+        }
+        Stmt::Goto { label, .. } | Stmt::Label { name: label, .. } => {
+            names.insert(label.clone());
+        }
+        Stmt::ExprStmt(expr) => collect_expr_names(expr, names),
+        Stmt::ClassDecl(class) => {
+            names.insert(class.name.clone());
+            for member in class
+                .top_level_members
+                .iter()
+                .chain(class.blocks.iter().flat_map(|block| block.members.iter()))
+            {
+                match member {
+                    Member::Field(field) => {
+                        names.insert(field.name.clone());
+                        if let Some(value) = &field.value {
+                            collect_expr_names(value, names);
+                        }
+                    }
+                    Member::Method(method) => {
+                        names.insert(method.name.clone());
+                        collect_param_names(&method.params, names);
+                        if let Some(body) = &method.body {
+                            for statement in body {
+                                collect_stmt_names(statement, names);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Stmt::ImportDecl { module_name } => {
+            names.insert(module_name.clone());
+        }
+        Stmt::DeclareStmt { name, .. } => {
+            names.insert(name.clone());
+        }
+        Stmt::Break | Stmt::Continue | Stmt::RawLua54(_) => {}
+    }
+}
+
+fn collect_param_names(params: &[Param], names: &mut HashSet<String>) {
+    for param in params {
+        if let Param::Named { name, .. } = param {
+            names.insert(name.clone());
+        }
+    }
+}
+
+fn collect_expr_names(expr: &Expr, names: &mut HashSet<String>) {
+    match expr {
+        Expr::Ident { name, .. } => {
+            names.insert(name.clone());
+        }
+        Expr::Field { obj, name } => {
+            names.insert(name.clone());
+            collect_expr_names(obj, names);
+        }
+        Expr::Index { obj, key } => {
+            collect_expr_names(obj, names);
+            collect_expr_names(key, names);
+        }
+        Expr::Call { callee, args } => {
+            collect_expr_names(callee, names);
+            for arg in args {
+                collect_expr_names(arg, names);
+            }
+        }
+        Expr::MethodCall { obj, method, args } => {
+            names.insert(method.clone());
+            collect_expr_names(obj, names);
+            for arg in args {
+                collect_expr_names(arg, names);
+            }
+        }
+        Expr::Unop { expr, .. } => collect_expr_names(expr, names),
+        Expr::Binop { left, right, .. } => {
+            collect_expr_names(left, names);
+            collect_expr_names(right, names);
+        }
+        Expr::Table(fields) => {
+            for field in fields {
+                match field {
+                    TableField::Index { key, value } => {
+                        collect_expr_names(key, names);
+                        collect_expr_names(value, names);
+                    }
+                    TableField::Name { name, value } => {
+                        names.insert(name.clone());
+                        collect_expr_names(value, names);
+                    }
+                    TableField::Value(value) => collect_expr_names(value, names),
+                }
+            }
+        }
+        Expr::Function { params, body, .. } => {
+            collect_param_names(params, names);
+            for statement in body {
+                collect_stmt_names(statement, names);
+            }
+        }
+        Expr::InterpolatedString(parts) => {
+            for part in parts {
+                if let InterpolatedPart::Expr(expr) = part {
+                    collect_expr_names(expr, names);
+                }
+            }
+        }
+        Expr::If(if_expr) => {
+            for clause in &if_expr.clauses {
+                collect_expr_names(&clause.cond, names);
+                for statement in &clause.branch.statements {
+                    collect_stmt_names(statement, names);
+                }
+                collect_expr_names(&clause.branch.result, names);
+            }
+            for statement in &if_expr.else_branch.statements {
+                collect_stmt_names(statement, names);
+            }
+            collect_expr_names(&if_expr.else_branch.result, names);
+        }
+        Expr::Bind { name, value, .. } => {
+            names.insert(name.clone());
+            collect_expr_names(value, names);
+        }
+        Expr::Nil
+        | Expr::True
+        | Expr::False
+        | Expr::Number(_)
+        | Expr::Str(_)
+        | Expr::Vararg
+        | Expr::SelfExpr
+        | Expr::SuperExpr => {}
     }
 }
 
@@ -1079,12 +1752,53 @@ fn contains_goto(body: &[Stmt]) -> bool {
         | Stmt::NumericFor { body, .. }
         | Stmt::GenericFor { body, .. } => contains_goto(body),
         Stmt::If { clauses, else_body } => {
-            clauses.iter().any(|clause| contains_goto(&clause.body))
+            clauses
+                .iter()
+                .any(|clause| contains_goto_expr(&clause.cond) || contains_goto(&clause.body))
                 || else_body.as_deref().is_some_and(contains_goto)
         }
+        Stmt::Local { values, .. } | Stmt::Const { values, .. } | Stmt::Return(values) => {
+            values.iter().any(contains_goto_expr)
+        }
+        Stmt::Assign { targets, values } => targets.iter().chain(values).any(contains_goto_expr),
+        Stmt::ExprStmt(expr) => contains_goto_expr(expr),
         Stmt::FunctionDecl { .. } | Stmt::ClassDecl(_) => false,
         _ => false,
     })
+}
+
+fn contains_goto_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::If(if_expr) => {
+            if_expr.clauses.iter().any(|clause| {
+                contains_goto_expr(&clause.cond)
+                    || contains_goto(&clause.branch.statements)
+                    || contains_goto_expr(&clause.branch.result)
+            }) || contains_goto(&if_expr.else_branch.statements)
+                || contains_goto_expr(&if_expr.else_branch.result)
+        }
+        Expr::Function { .. } => false,
+        Expr::Field { obj, .. } | Expr::Unop { expr: obj, .. } => contains_goto_expr(obj),
+        Expr::Index { obj, key } => contains_goto_expr(obj) || contains_goto_expr(key),
+        Expr::Call { callee, args } => {
+            contains_goto_expr(callee) || args.iter().any(contains_goto_expr)
+        }
+        Expr::MethodCall { obj, args, .. } => {
+            contains_goto_expr(obj) || args.iter().any(contains_goto_expr)
+        }
+        Expr::Binop { left, right, .. } => contains_goto_expr(left) || contains_goto_expr(right),
+        Expr::Table(fields) => fields.iter().any(|field| match field {
+            TableField::Index { key, value } => {
+                contains_goto_expr(key) || contains_goto_expr(value)
+            }
+            TableField::Name { value, .. } | TableField::Value(value) => contains_goto_expr(value),
+        }),
+        Expr::InterpolatedString(parts) => parts.iter().any(|part| match part {
+            InterpolatedPart::Literal(_) => false,
+            InterpolatedPart::Expr(expr) => contains_goto_expr(expr),
+        }),
+        _ => false,
+    }
 }
 
 fn contains_continue(body: &[Stmt]) -> bool {
@@ -1092,9 +1806,17 @@ fn contains_continue(body: &[Stmt]) -> bool {
         Stmt::Continue => true,
         Stmt::Do { body } => contains_continue(body),
         Stmt::If { clauses, else_body } => {
-            clauses.iter().any(|clause| contains_continue(&clause.body))
-                || else_body.as_deref().is_some_and(contains_continue)
+            clauses.iter().any(|clause| {
+                contains_continue_expr(&clause.cond) || contains_continue(&clause.body)
+            }) || else_body.as_deref().is_some_and(contains_continue)
         }
+        Stmt::Local { values, .. } | Stmt::Const { values, .. } | Stmt::Return(values) => {
+            values.iter().any(contains_continue_expr)
+        }
+        Stmt::Assign { targets, values } => {
+            targets.iter().chain(values).any(contains_continue_expr)
+        }
+        Stmt::ExprStmt(expr) => contains_continue_expr(expr),
         // A continue in a nested loop belongs to that loop.
         Stmt::While { .. }
         | Stmt::Repeat { .. }
@@ -1104,4 +1826,42 @@ fn contains_continue(body: &[Stmt]) -> bool {
         | Stmt::ClassDecl(_) => false,
         _ => false,
     })
+}
+
+fn contains_continue_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::If(if_expr) => {
+            if_expr.clauses.iter().any(|clause| {
+                contains_continue_expr(&clause.cond)
+                    || contains_continue(&clause.branch.statements)
+                    || contains_continue_expr(&clause.branch.result)
+            }) || contains_continue(&if_expr.else_branch.statements)
+                || contains_continue_expr(&if_expr.else_branch.result)
+        }
+        Expr::Function { .. } => false,
+        Expr::Field { obj, .. } | Expr::Unop { expr: obj, .. } => contains_continue_expr(obj),
+        Expr::Index { obj, key } => contains_continue_expr(obj) || contains_continue_expr(key),
+        Expr::Call { callee, args } => {
+            contains_continue_expr(callee) || args.iter().any(contains_continue_expr)
+        }
+        Expr::MethodCall { obj, args, .. } => {
+            contains_continue_expr(obj) || args.iter().any(contains_continue_expr)
+        }
+        Expr::Binop { left, right, .. } => {
+            contains_continue_expr(left) || contains_continue_expr(right)
+        }
+        Expr::Table(fields) => fields.iter().any(|field| match field {
+            TableField::Index { key, value } => {
+                contains_continue_expr(key) || contains_continue_expr(value)
+            }
+            TableField::Name { value, .. } | TableField::Value(value) => {
+                contains_continue_expr(value)
+            }
+        }),
+        Expr::InterpolatedString(parts) => parts.iter().any(|part| match part {
+            InterpolatedPart::Literal(_) => false,
+            InterpolatedPart::Expr(expr) => contains_continue_expr(expr),
+        }),
+        _ => false,
+    }
 }

@@ -16,3 +16,6 @@ Thumbs.db
 # Temporary and generated files
 *.log
 *.tmp
+
+# For testing language server
+luar-vscode/playground/

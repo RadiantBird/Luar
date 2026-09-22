@@ -54,6 +54,34 @@ pub enum Expr {
         return_type: Option<TypeExpr>,
         body: Vec<Stmt>,
     },
+    /// A block-valued conditional expression.  Each branch keeps its
+    /// statements separate from the expression whose value it produces.
+    If(IfExpr),
+    /// A condition-only local binding: `name := value`.
+    Bind {
+        name: String,
+        value: Box<Expr>,
+        span: SourceSpan,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct IfExpr {
+    pub clauses: Vec<IfExprClause>,
+    pub else_branch: IfExprBranch,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone)]
+pub struct IfExprClause {
+    pub cond: Expr,
+    pub branch: IfExprBranch,
+}
+
+#[derive(Debug, Clone)]
+pub struct IfExprBranch {
+    pub statements: Vec<Stmt>,
+    pub result: Box<Expr>,
 }
 
 #[derive(Debug, Clone)]

@@ -147,7 +147,7 @@ export class Parser {
 
   private parseWhile(): Stmt {
     this.eat("while");
-    const cond = this.parseExpr();
+    const cond = this.parseCondition();
     this.eat("do");
     const body = this.parseBlock(["end"]);
     this.eat("end");
@@ -165,12 +165,12 @@ export class Parser {
   private parseIf(): Stmt {
     this.eat("if");
     const clauses: IfClause[] = [];
-    const cond = this.parseExpr();
+    const cond = this.parseCondition();
     this.eat("then");
     const body = this.parseBlock(["elseif", "else", "end"]);
     clauses.push({ cond, body });
     while (this.match("elseif")) {
-      const c = this.parseExpr();
+      const c = this.parseCondition();
       this.eat("then");
       const b = this.parseBlock(["elseif", "else", "end"]);
       clauses.push({ cond: c, body: b });
@@ -381,13 +381,34 @@ export class Parser {
 
   // ─── Expressions ──────────────────────────────────────────────────────────
 
+  private parseCondition(): Expr {
+    if (this.check("Ident") && this.tokens[this.pos + 1]?.kind === ":=") {
+      const name = this.advance().value;
+      this.eat(":=");
+      return { kind: "Bind", name, value: this.parseExpr() };
+    }
+    const expr = this.parseOr();
+    if (this.check(":=")) {
+      const token = this.peek();
+      throw new ParseError("left side of ':=' must be a bare identifier", token.line, token.col);
+    }
+    return expr;
+  }
+
   private parseExprList(): Expr[] {
     const exprs = [this.parseExpr()];
     while (this.match(",")) exprs.push(this.parseExpr());
     return exprs;
   }
 
-  private parseExpr(): Expr { return this.parseOr(); }
+  private parseExpr(): Expr {
+    const expr = this.parseOr();
+    if (this.check(":=")) {
+      const token = this.peek();
+      throw new ParseError("':=' is only allowed in conditional contexts (if, elseif, while)", token.line, token.col);
+    }
+    return expr;
+  }
 
   private parseOr(): Expr {
     let left = this.parseAnd();

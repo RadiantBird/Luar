@@ -150,6 +150,9 @@ impl Checker {
         match (expected, actual) {
             (_, ValueType::Unknown) | (ValueType::Unknown, _) => true,
             (ValueType::Optional(_), ValueType::Nil) => true,
+            (ValueType::Optional(expected), ValueType::Optional(actual)) => {
+                Self::is_assignable(expected, actual)
+            }
             (ValueType::Optional(inner), actual) => Self::is_assignable(inner, actual),
             _ => expected == actual,
         }
@@ -237,8 +240,8 @@ impl Checker {
                     self.check_stmt_types(child_stmt, &mut child);
                 }
             }
-            Stmt::Do { body } | Stmt::While { body, .. } | Stmt::Repeat { body, .. } => {
-                if let Stmt::While { cond, .. } | Stmt::Repeat { cond, .. } = stmt {
+            Stmt::Do { body } | Stmt::Repeat { body, .. } => {
+                if let Stmt::Repeat { cond, .. } = stmt {
                     self.infer_expr_type(cond, env);
                 }
                 let mut child = env.clone();
@@ -246,10 +249,27 @@ impl Checker {
                     self.check_stmt_types(child_stmt, &mut child);
                 }
             }
+            Stmt::While { cond, body } => {
+                let mut child = env.clone();
+                if let Expr::Bind { name, value, .. } = cond {
+                    let rhs_type = self.infer_expr_type(value, env);
+                    child.insert(name.clone(), Self::truthy_refinement(rhs_type));
+                } else {
+                    self.infer_expr_type(cond, env);
+                }
+                for child_stmt in body {
+                    self.check_stmt_types(child_stmt, &mut child);
+                }
+            }
             Stmt::If { clauses, else_body } => {
                 for clause in clauses {
-                    self.infer_expr_type(&clause.cond, env);
                     let mut child = env.clone();
+                    if let Expr::Bind { name, value, .. } = &clause.cond {
+                        let rhs_type = self.infer_expr_type(value, env);
+                        child.insert(name.clone(), Self::truthy_refinement(rhs_type));
+                    } else {
+                        self.infer_expr_type(&clause.cond, env);
+                    }
                     for child_stmt in &clause.body {
                         self.check_stmt_types(child_stmt, &mut child);
                     }
@@ -389,8 +409,84 @@ impl Checker {
                 }
                 ValueType::String
             }
+            Expr::If(if_expr) => {
+                let mut result_type = None;
+                for clause in &if_expr.clauses {
+                    let mut branch_env = env.clone();
+                    if let Expr::Bind { name, value, .. } = &clause.cond {
+                        let rhs_type = self.infer_expr_type(value, env);
+                        branch_env.insert(name.clone(), Self::truthy_refinement(rhs_type));
+                    } else {
+                        self.infer_expr_type(&clause.cond, env);
+                    }
+                    for statement in &clause.branch.statements {
+                        self.check_stmt_types(statement, &mut branch_env);
+                    }
+                    let branch_type = self.infer_expr_type(&clause.branch.result, &branch_env);
+                    result_type =
+                        Some(self.merge_if_branch_types(result_type, branch_type, if_expr.span));
+                }
+
+                let mut branch_env = env.clone();
+                for statement in &if_expr.else_branch.statements {
+                    self.check_stmt_types(statement, &mut branch_env);
+                }
+                let else_type = self.infer_expr_type(&if_expr.else_branch.result, &branch_env);
+                self.merge_if_branch_types(result_type, else_type, if_expr.span)
+            }
+            Expr::Bind { value, .. } => self.infer_expr_type(value, env),
             _ => ValueType::Unknown,
         }
+    }
+
+    fn truthy_refinement(value_type: ValueType) -> ValueType {
+        match value_type {
+            ValueType::Optional(inner) => *inner,
+            ValueType::Nil => ValueType::Unknown,
+            other => other,
+        }
+    }
+
+    fn merge_if_branch_types(
+        &mut self,
+        current: Option<ValueType>,
+        next: ValueType,
+        span: SourceSpan,
+    ) -> ValueType {
+        let Some(current) = current else {
+            return next;
+        };
+        if Self::is_assignable(&current, &next) {
+            return current;
+        }
+        if Self::is_assignable(&next, &current) {
+            return next;
+        }
+        if current == ValueType::Nil && next != ValueType::Nil {
+            return ValueType::Optional(Box::new(next));
+        }
+        if next == ValueType::Nil && current != ValueType::Nil {
+            return ValueType::Optional(Box::new(current));
+        }
+        if let ValueType::Optional(inner) = &current {
+            if Self::is_assignable(inner, &next) {
+                return current;
+            }
+        }
+        if let ValueType::Optional(inner) = &next {
+            if Self::is_assignable(inner, &current) {
+                return next;
+            }
+        }
+        self.err_at(
+            format!(
+                "if expression branches have incompatible result types: {} and {}",
+                current.display(),
+                next.display()
+            ),
+            span,
+        );
+        ValueType::Unknown
     }
 
     fn check_binary_operator(
@@ -997,6 +1093,44 @@ impl Checker {
             }
             Expr::Function { body, .. } => {
                 self.check_body_access(body, &mut env.clone(), current_class, can_use_super, line);
+            }
+            Expr::If(if_expr) => {
+                for clause in &if_expr.clauses {
+                    self.check_expr_access(&clause.cond, env, current_class, can_use_super, line);
+                    let mut branch_env = env.clone();
+                    self.check_body_access(
+                        &clause.branch.statements,
+                        &mut branch_env,
+                        current_class,
+                        can_use_super,
+                        line,
+                    );
+                    self.check_expr_access(
+                        &clause.branch.result,
+                        &branch_env,
+                        current_class,
+                        can_use_super,
+                        line,
+                    );
+                }
+                let mut branch_env = env.clone();
+                self.check_body_access(
+                    &if_expr.else_branch.statements,
+                    &mut branch_env,
+                    current_class,
+                    can_use_super,
+                    line,
+                );
+                self.check_expr_access(
+                    &if_expr.else_branch.result,
+                    &branch_env,
+                    current_class,
+                    can_use_super,
+                    line,
+                );
+            }
+            Expr::Bind { value, .. } => {
+                self.check_expr_access(value, env, current_class, can_use_super, line);
             }
             Expr::SuperExpr => {
                 self.err("'super' must be used as 'super.method()'".to_string(), line);

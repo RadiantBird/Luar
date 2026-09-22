@@ -15,7 +15,7 @@ export type TokenKind =
   // Delimiters
   | "(" | ")" | "{" | "}" | "[" | "]"
   // Punctuation
-  | "." | "," | ":" | ";" | "->"
+  | "." | "," | ":" | ":=" | ";" | "->"
   // Assignment & comparison
   | "=" | "==" | "~="
   | "<" | ">" | "<=" | ">="
