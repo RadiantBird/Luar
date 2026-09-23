@@ -1,0 +1,8 @@
+local function getornot():string?
+    local r = math.random(0, 1)
+    return if r == 1 then "Gold" else nil end
+end
+
+if item := getornot() then
+    print(`Got it!!! -> {item}`)
+end

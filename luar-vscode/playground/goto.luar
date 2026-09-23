@@ -1,0 +1,14 @@
+function main()
+    for i = 1, 10 do
+        for j = 1, 10 do
+            if i == 1 and j == 3 then
+                goto exit
+            end
+            print(i, j)
+        end
+    end
+    print("end for loop")
+    ::exit::
+    print("exit")
+end
+main()

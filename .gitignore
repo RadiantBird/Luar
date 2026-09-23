@@ -18,4 +18,4 @@ Thumbs.db
 *.tmp
 
 # For testing language server
-luar-vscode/playground/
+# luar-vscode/playground/

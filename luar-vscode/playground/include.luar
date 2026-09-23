@@ -1,0 +1,4 @@
+import type mod
+local mod = !include("@./mod.luar")
+mod.run()
+print(mod.hogehoge)

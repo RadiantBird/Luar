@@ -44,6 +44,12 @@ fn nested_loop_exit_uses_dispatcher_for_luau() {
     assert!(!output.contains("goto exit"));
     assert!(!output.contains("::exit::"));
     assert!(output.contains("print(\"exit\")"));
+    let lines = output.lines().collect::<Vec<_>>();
+    assert!(
+        !lines
+            .windows(2)
+            .any(|pair| { pair[0].trim() == "break" && pair[1].contains("__luar_pc_") })
+    );
 }
 
 #[test]

@@ -1,0 +1,8 @@
+local mod = {}
+mod.hogehoge = "gepyaaa"
+
+function mod.run()
+    print("this is mod, not admin!")
+end
+
+return mod

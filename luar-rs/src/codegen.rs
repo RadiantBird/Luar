@@ -48,6 +48,11 @@ pub struct Codegen {
     next_generated_name: usize,
     continue_wrappers: Vec<Option<String>>,
     dispatcher: Option<(String, String)>,
+    /// A Luau dispatcher goto emits `break`, so the generic guard that callers
+    /// normally append after every statement would be unreachable.  Suppress
+    /// only that immediate guard; enclosing loop bodies still receive their
+    /// own guards and propagate the state change outward.
+    suppress_dispatch_guard: bool,
     reserved_names: HashSet<String>,
 }
 
@@ -72,6 +77,7 @@ impl Codegen {
             next_generated_name: 0,
             continue_wrappers: Vec::new(),
             dispatcher: None,
+            suppress_dispatch_guard: false,
             reserved_names: HashSet::new(),
         }
     }
@@ -82,6 +88,7 @@ impl Codegen {
         self.type_env = vec![HashMap::new()];
         self.registry = self.build_registry(program);
         self.reserved_names = collect_program_names(program);
+        self.suppress_dispatch_guard = false;
 
         self.emit_function_body(&program.stmts);
         self.out.join("\n")
@@ -352,6 +359,10 @@ impl Codegen {
     }
 
     fn emit_dispatch_guard(&mut self) {
+        if self.suppress_dispatch_guard {
+            self.suppress_dispatch_guard = false;
+            return;
+        }
         if let Some((state, current)) = &self.dispatcher {
             let state = state.clone();
             let current = current.clone();
@@ -573,6 +584,7 @@ impl Codegen {
                     let state = state.clone();
                     self.line(&format!("{state} = \"{}\"", Self::escape_string(label)));
                     self.line("break");
+                    self.suppress_dispatch_guard = true;
                 }
             }
             Stmt::Label { name, .. } => {

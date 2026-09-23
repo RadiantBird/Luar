@@ -1,0 +1,15 @@
+local number = math.random(1, 10)
+local function cut(x:number)
+    return x / 2
+end
+
+local y = 0
+local p = if number % 2 == 0 then
+    y = cut(number)
+    "even"
+else
+    y = number
+    "odd"
+end
+
+print(p, y)

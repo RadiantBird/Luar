@@ -1,0 +1,28 @@
+class Foo is
+    public is
+        static function new()
+            print("Hello, World!")        
+        end
+
+        function whoru()
+            print("Who is Foo?")
+        end
+
+        static function add2(x:number, y:number): number
+            return x + y
+        end
+    end
+end
+
+local function Bar()
+    -- abcdefg
+    print(1/2/3)
+end
+
+local i = Foo.new()
+const pi = 3.141592
+const r2 = 1.414213
+Bar()
+
+local ans = Foo.add2(pi, r2)
+print(ans)

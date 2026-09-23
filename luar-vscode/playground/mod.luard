@@ -1,0 +1,3 @@
+declare hogehoge: string
+
+declare run: () -> ()
