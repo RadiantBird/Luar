@@ -20,7 +20,10 @@ export function activate(context: ExtensionContext) {
   };
 
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [{ scheme: "file", language: "luar" }],
+    documentSelector: [
+      { scheme: "file", language: "luar" },
+      { scheme: "file", language: "luard" },
+    ],
     initializationOptions: compilerSettings(),
     synchronize: {
       configurationSection: "luar",

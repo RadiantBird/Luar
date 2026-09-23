@@ -30,9 +30,9 @@ fn check_stdin_emits_the_editor_json_diagnostic_schema() {
     let diagnostic = &report["diagnostics"][0];
     assert_eq!(diagnostic["file"], "C:\\project\\main.luar");
     assert_eq!(diagnostic["line"], 1);
-    assert_eq!(diagnostic["column"], 7);
+    assert_eq!(diagnostic["column"], 1);
     assert_eq!(diagnostic["endLine"], 1);
-    assert_eq!(diagnostic["endColumn"], 8);
+    assert_eq!(diagnostic["endColumn"], 10);
     assert_eq!(diagnostic["severity"], "error");
     assert!(
         diagnostic["message"]
@@ -40,6 +40,38 @@ fn check_stdin_emits_the_editor_json_diagnostic_schema() {
             .unwrap()
             .contains("expected identifier")
     );
+}
+
+#[test]
+fn semantic_errors_underline_the_complete_source_statement() {
+    let mut child = luar()
+        .args([
+            "check",
+            "--stdin",
+            "--source-path",
+            "C:\\project\\main.luar",
+            "--diagnostic-format",
+            "json",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"    local title: string = 42   \n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let diagnostic = &report["diagnostics"][0];
+    assert_eq!(diagnostic["line"], 1);
+    assert_eq!(diagnostic["column"], 5);
+    assert_eq!(diagnostic["endLine"], 1);
+    assert_eq!(diagnostic["endColumn"], 29);
 }
 
 #[test]

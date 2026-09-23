@@ -4,6 +4,7 @@
   "description": "Syntax highlighting, snippets, and language server for the Luar programming language",
   "version": "0.1.0",
   "publisher": "luar",
+  "icon": "images/source.png",
   "engines": {
     "vscode": "^1.80.0"
   },
@@ -17,7 +18,8 @@
     "oop"
   ],
   "activationEvents": [
-    "onLanguage:luar"
+    "onLanguage:luar",
+    "onLanguage:luard"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -41,13 +43,32 @@
       {
         "id": "luar",
         "aliases": ["Luar", "luar"],
-        "extensions": [".luar", ".luard"],
-        "configuration": "./language-configuration.json"
+        "extensions": [".luar"],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./images/source.png",
+          "dark": "./images/source.png"
+        }
+      },
+      {
+        "id": "luard",
+        "aliases": ["Luar Definition", "luard"],
+        "extensions": [".luard"],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./images/definition.png",
+          "dark": "./images/definition.png"
+        }
       }
     ],
     "grammars": [
       {
         "language": "luar",
+        "scopeName": "source.luar",
+        "path": "./syntaxes/luar.tmLanguage.json"
+      },
+      {
+        "language": "luard",
         "scopeName": "source.luar",
         "path": "./syntaxes/luar.tmLanguage.json"
       }
@@ -56,10 +77,17 @@
       {
         "language": "luar",
         "path": "./snippets/luar.json"
+      },
+      {
+        "language": "luard",
+        "path": "./snippets/luar.json"
       }
     ],
     "configurationDefaults": {
       "[luar]": {
+        "editor.minimap.enabled": false
+      },
+      "[luard]": {
         "editor.minimap.enabled": false
       }
     }

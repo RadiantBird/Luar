@@ -369,10 +369,10 @@ pub fn analyze_source_with_options(
             end_line: error.line.max(1),
             end_column: 2,
         });
-        diagnostic_from_expanded(&expanded, &file, span, Severity::Error, error.message)
+        diagnostic_from_expanded_statement(&expanded, &file, span, Severity::Error, error.message)
     }));
     errors.extend(control_flow::validate(&program).into_iter().map(|error| {
-        diagnostic_from_expanded(
+        diagnostic_from_expanded_statement(
             &expanded,
             &file,
             SourceSpan {
@@ -444,8 +444,53 @@ fn diagnostic_from_expanded(
     severity: Severity,
     message: String,
 ) -> Diagnostic {
+    // A number of parser/control-flow errors only have a cursor-sized source
+    // location.  Such a range is technically valid LSP, but a one-character
+    // underline is difficult to associate with the statement that caused it.
+    // Preserve precise token ranges and widen only point-like locations.
+    let span = if severity == Severity::Error && is_point_like(span) {
+        statement_span(&expanded.source, span)
+    } else {
+        span
+    };
     let (file, span) = expanded.remap_span(span, fallback_file);
     diagnostic_with_span(&file, span, severity, message)
+}
+
+fn diagnostic_from_expanded_statement(
+    expanded: &include::ExpandedSource,
+    fallback_file: &str,
+    span: SourceSpan,
+    severity: Severity,
+    message: String,
+) -> Diagnostic {
+    let span = statement_span(&expanded.source, span);
+    let (file, span) = expanded.remap_span(span, fallback_file);
+    diagnostic_with_span(&file, span, severity, message)
+}
+
+fn is_point_like(span: SourceSpan) -> bool {
+    span.line == span.end_line && span.end_column <= span.column.saturating_add(1)
+}
+
+/// Expand a diagnostic to the non-whitespace contents of its source line.
+/// Columns are counted as UTF-16 code units, matching both the lexer and LSP.
+fn statement_span(source: &str, span: SourceSpan) -> SourceSpan {
+    let Some(line) = source.lines().nth(span.line.saturating_sub(1)) else {
+        return span;
+    };
+    let content = line.trim_end_matches([' ', '\t', '\r']);
+    let Some(first) = content.find(|character: char| !character.is_whitespace()) else {
+        return span;
+    };
+    let start_column = content[..first].encode_utf16().count() + 1;
+    let end_column = content.encode_utf16().count() + 1;
+    SourceSpan {
+        line: span.line,
+        column: start_column,
+        end_line: span.line,
+        end_column: end_column.max(start_column.saturating_add(1)),
+    }
 }
 
 fn diagnostic_from_message(default_file: &str, message: &str) -> Diagnostic {
