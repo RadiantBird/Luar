@@ -1,11 +1,13 @@
 pub mod ast;
 pub mod checker;
 pub mod codegen;
+pub mod completion;
 pub mod control_flow;
 pub mod include;
 pub mod lexer;
 pub mod modules;
 pub mod parser;
+pub mod rename;
 pub mod resolver;
 
 use crate::lexer::SourceSpan;
@@ -281,10 +283,16 @@ pub fn check_source_with_options(
     analyze_source_with_options(source, options).map(|analysis| analysis.program)
 }
 
-pub fn analyze_source_with_options(
-    source: &str,
-    options: &CompileOptions,
-) -> Result<Analysis, Vec<Diagnostic>> {
+/// include展開・構文解析・import解決まで済ませた、型検査の直前の状態。
+struct Prepared {
+    file: String,
+    expanded: include::ExpandedSource,
+    program: ast::Program,
+    definitions: Vec<modules::ModuleDefinition>,
+    errors: Vec<Diagnostic>,
+}
+
+fn prepare_analysis(source: &str, options: &CompileOptions) -> Result<Prepared, Vec<Diagnostic>> {
     let file = options
         .source_path
         .as_deref()
@@ -348,7 +356,20 @@ pub fn analyze_source_with_options(
             ));
             return Err(errors);
         }
+        let include_bindings = include::include_binding_names(source);
         for module_name in imports {
+            if include_bindings.contains(&module_name)
+                && !modules::definition_path(&module_name, source_path).exists()
+            {
+                // `!include` したソースが見えているので、`.luard` なしで済ませる。
+                let members = checker::Checker::new().module_members(&program, &module_name);
+                definitions.push(modules::ModuleDefinition {
+                    name: module_name,
+                    members: members.into_iter().collect(),
+                    ..Default::default()
+                });
+                continue;
+            }
             match modules::load_definition(&module_name, source_path) {
                 Ok(definition) => definitions.push(definition),
                 Err(error) => errors.push(diagnostic(&file, error.line.max(1), error.message)),
@@ -356,12 +377,35 @@ pub fn analyze_source_with_options(
         }
     }
 
+    Ok(Prepared {
+        file,
+        expanded,
+        program,
+        definitions,
+        errors,
+    })
+}
+
+pub fn analyze_source_with_options(
+    source: &str,
+    options: &CompileOptions,
+) -> Result<Analysis, Vec<Diagnostic>> {
+    let Prepared {
+        file,
+        expanded,
+        mut program,
+        definitions,
+        mut errors,
+    } = prepare_analysis(source, options)?;
+
     let resolver_errors =
-        resolver::Resolver::new(definitions, options.target).resolve(&mut program);
+        resolver::Resolver::new(definitions.clone(), options.target).resolve(&mut program);
     errors.extend(resolver_errors.into_iter().map(|error| {
         diagnostic_from_expanded(&expanded, &file, error.span, error.severity, error.message)
     }));
-    let checker_errors = checker::Checker::new().check(&mut program);
+    let checker_errors = checker::Checker::new()
+        .with_modules(definitions)
+        .check(&mut program);
     errors.extend(checker_errors.into_iter().map(|error| {
         let span = error.span.unwrap_or(SourceSpan {
             line: error.line.max(1),
@@ -399,6 +443,37 @@ pub fn analyze_source_with_options(
         program,
         diagnostics: errors,
     })
+}
+
+/// カーソル位置(UTF-16オフセット)で提案できる候補を、チェッカーの型情報から返す。
+/// 診断は返さない。入力途中のソースでも、候補が得られる範囲で結果を返す。
+pub fn complete_source_with_options(
+    source: &str,
+    utf16_offset: usize,
+    options: &CompileOptions,
+) -> Result<Vec<completion::CompletionItem>, String> {
+    let probe = completion::build_probe(source, utf16_offset);
+    let prepared = prepare_analysis(&probe.source, options).or_else(|first_error| {
+        // 閉じ括弧が足りない入力途中のソースは、補った版でもう一度試す。
+        match &probe.repaired {
+            Some(repaired) => prepare_analysis(repaired, options).map_err(|_| first_error),
+            None => Err(first_error),
+        }
+    });
+    let Prepared {
+        mut program,
+        definitions,
+        ..
+    } = prepared.map_err(|diagnostics| {
+        diagnostics
+            .first()
+            .map(|diagnostic| diagnostic.message.clone())
+            .unwrap_or_else(|| "cannot analyze source".to_string())
+    })?;
+    resolver::Resolver::new(definitions.clone(), options.target).resolve(&mut program);
+    let mut checker = checker::Checker::new().with_modules(definitions);
+    checker.check(&mut program);
+    Ok(checker.take_completions().unwrap_or_default())
 }
 
 pub fn dump_ir(source: &str, options: &CompileOptions) -> Result<String, Vec<Diagnostic>> {

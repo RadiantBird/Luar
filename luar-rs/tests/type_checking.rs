@@ -69,3 +69,64 @@ local invalid = value + 1
             .any(|error| error.contains("operator '+' for 'Vector' expects Vector, got number"))
     );
 }
+
+const DOG_MODULE: &str = r#"
+class Dog is
+    public is
+        name:string = "Pochi"
+        age = 3
+        function bark(): string
+            return "wan"
+        end
+    end
+end
+
+local module = {}
+module = { dog = Dog.new() }
+local clsdef = module
+"#;
+
+fn check_with_dog_module(tail: &str) -> Result<(), Vec<String>> {
+    check(&format!("{DOG_MODULE}{tail}"))
+}
+
+#[test]
+fn infers_table_shape_through_reassignment_and_alias() {
+    check_with_dog_module("local n: string = clsdef.dog.name\nlocal a: number = clsdef.dog.age\n")
+        .expect("field types follow the module table");
+    let errors = check_with_dog_module("local n: number = clsdef.dog.name\n")
+        .expect_err("string field assigned to number must fail");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("cannot assign string to 'n: number'"))
+    );
+}
+
+#[test]
+fn infers_method_return_type_from_annotation() {
+    let errors = check_with_dog_module("local n: number = clsdef.dog.bark()\n")
+        .expect_err("annotated return type must be used");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("cannot assign string to 'n: number'"))
+    );
+}
+
+#[test]
+fn shape_tracks_fields_added_after_creation() {
+    check("local mod = {}\nmod.title = 'x'\nfunction mod.run() end\nlocal t: string = mod.title\n")
+        .expect("assigned field type is tracked");
+    let errors = check("local mod = {}\nmod.title = 'x'\nlocal t: number = mod.title\n")
+        .expect_err("assigned field type is tracked");
+    assert!(errors.iter().any(|error| error.contains("cannot assign string")));
+}
+
+#[test]
+fn unknown_shape_members_stay_unknown() {
+    check("local mod = { a = 1 }\nlocal v: number = mod.missing\nlocal w: string = mod.a\n")
+        .expect_err("only the known field w is wrong");
+    check("local mod = { a = 1 }\nlocal v: number = mod.missing\n")
+        .expect("unknown member must not be rejected");
+}

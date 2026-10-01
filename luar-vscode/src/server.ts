@@ -113,7 +113,7 @@ connection.onDidChangeWatchedFiles(() => {
   refreshOpenImporters();
 });
 
-connection.onCompletion((params: CompletionParams): CompletionItem[] => {
+connection.onCompletion(async (params: CompletionParams): Promise<CompletionItem[]> => {
   const document = documents.get(params.textDocument.uri);
   if (!document) return [];
   const index = getIndex(document);
@@ -137,6 +137,11 @@ connection.onCompletion((params: CompletionParams): CompletionItem[] => {
       .filter((symbol) => symbol.kind === "label" && symbol.name.startsWith(labelPrefix))
       .map(completionFor);
   }
+  // 型の判断はコンパイラ(チェッカー)が行う。呼び出せない・結果が空のときだけ、
+  // 文字列一致によるこのファイル内の索引へフォールバックする。
+  const compilerItems = await requestCompilerCompletions(document, params.position);
+  const isMemberAccess = /[A-Za-z0-9_)\]][.:]([A-Za-z_][A-Za-z0-9_]*)?$/.test(before);
+  if (isMemberAccess && compilerItems?.length) return compilerItems.map(compilerCompletionFor);
   const memberMatch = before.match(/([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)?$/);
   if (memberMatch) {
     const memberPrefix = memberMatch[2] ?? "";
@@ -146,6 +151,13 @@ connection.onCompletion((params: CompletionParams): CompletionItem[] => {
     return members.map((symbol) => completionFor(symbol));
   }
   const prefix = /[A-Za-z_][A-Za-z0-9_]*$/.exec(before)?.[0] ?? "";
+  if (compilerItems?.length) {
+    return compilerItems.map(compilerCompletionFor).concat(
+      index.keywords
+        .filter((keyword) => keyword.startsWith(prefix))
+        .map((keyword) => ({ label: keyword, kind: CompletionItemKind.Keyword })),
+    );
+  }
   return index.symbols.filter((symbol) => !symbol.parent && symbol.name.startsWith(prefix)).map(completionFor).concat(
     index.keywords
       .filter((keyword) => keyword.startsWith(prefix))
@@ -251,6 +263,73 @@ function errorRange(error: { line: number; col: number }, fallbackLine: number, 
   const col = error.col >= 0 ? error.col : fallbackCol;
   return Range.create(line, col, line, col + 1);
 }
+interface CompilerCompletionItem {
+  label: string;
+  kind: "field" | "method" | "function" | "variable" | "constant" | "class" | "module";
+  type: string;
+  detail: string;
+}
+
+/** コンパイラに、カーソル位置で見える名前・メンバーとその型を問い合わせる。失敗時は null。 */
+function requestCompilerCompletions(document: TextDocument, position: Position): Promise<CompilerCompletionItem[] | null> {
+  let sourcePath: string;
+  try {
+    sourcePath = fileURLToPath(document.uri);
+  } catch {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    const child = spawn(settings.compilerPath, [
+      "complete", "--target", settings.target, "--stdin",
+      "--source-path", sourcePath, "--offset", String(document.offsetAt(position)),
+    ], { windowsHide: true });
+    let stdout = "";
+    let settled = false;
+    const finish = (value: CompilerCompletionItem[] | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(null);
+    }, 3000);
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+    child.on("error", () => finish(null));
+    child.stdin.on("error", () => { /* close/error handlers own the result */ });
+    child.on("close", (code) => {
+      if (code !== 0) return finish(null);
+      try {
+        finish((JSON.parse(stdout) as { items?: CompilerCompletionItem[] }).items ?? null);
+      } catch {
+        finish(null);
+      }
+    });
+    child.stdin.end(document.getText());
+  });
+}
+
+function compilerCompletionFor(item: CompilerCompletionItem): CompletionItem {
+  const kinds: Record<CompilerCompletionItem["kind"], CompletionItemKind> = {
+    field: CompletionItemKind.Field,
+    method: CompletionItemKind.Method,
+    function: CompletionItemKind.Function,
+    variable: CompletionItemKind.Variable,
+    constant: CompletionItemKind.Constant,
+    class: CompletionItemKind.Class,
+    module: CompletionItemKind.Module,
+  };
+  return {
+    label: item.label,
+    kind: kinds[item.kind] ?? CompletionItemKind.Text,
+    detail: item.detail,
+    labelDetails: { description: item.type },
+    documentation: { kind: MarkupKind.Markdown, value: `\`\`\`luar\n${item.detail}\n\`\`\`` },
+  };
+}
+
 function completionFor(symbol: LanguageSymbol): CompletionItem {
   const kinds: Record<LanguageSymbol["kind"], CompletionItemKind> = { class: CompletionItemKind.Class, method: CompletionItemKind.Method, field: CompletionItemKind.Field, function: CompletionItemKind.Function, variable: CompletionItemKind.Variable, module: CompletionItemKind.Module, label: CompletionItemKind.Reference };
   return { label: symbol.name, kind: kinds[symbol.kind], detail: symbol.signature, documentation: symbol.signature };

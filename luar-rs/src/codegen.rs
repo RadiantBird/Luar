@@ -838,9 +838,14 @@ impl Codegen {
         }
 
         // constructor
+        // `new` を一つも宣言していないクラス(privateのみの宣言を除く)には、
+        // コンパイラが引数なしのデフォルトコンストラクタを生成する。
+        let declares_new = methods.iter().any(|(_, m)| m.name == "new");
         if ctor.is_none() {
             if let Some(parent) = &decl.parent {
                 self.emit_inherited_new(name, parent, &fields);
+            } else if !declares_new {
+                self.emit_default_new(name, &fields);
             }
         }
         if let Some((_, m)) = ctor {
@@ -932,8 +937,27 @@ impl Codegen {
         self.current_class = prev;
     }
 
+    fn emit_default_new(&mut self, name: &str, fields: &[(Access, FieldMember)]) {
+        self.blank();
+        self.line(&format!("function {name}.new()"));
+        self.indented(|s| {
+            s.line(&format!("local self = setmetatable({{}}, {name})"));
+            for (_, f) in fields {
+                let val = f
+                    .value
+                    .as_ref()
+                    .map(|v| s.emit_expr(v))
+                    .unwrap_or_else(|| "nil".to_string());
+                s.line(&format!("self.{} = {val}", f.name));
+            }
+            s.line("return self");
+        });
+        self.line("end");
+    }
+
     fn emit_inherited_new(&mut self, name: &str, parent: &str, fields: &[(Access, FieldMember)]) {
         // find ancestor new params
+        // 祖先のどこにも `new` の宣言がなければ、祖先のデフォルトコンストラクタ(引数なし)を呼ぶ。
         let mut ancestor_params: Option<Vec<Param>> = None;
         let mut cur = Some(parent.to_string());
         while let Some(c) = cur {
@@ -945,6 +969,9 @@ impl Codegen {
                     break;
                 }
                 cur = reg.parent.clone();
+                if cur.is_none() {
+                    ancestor_params = Some(Vec::new());
+                }
             } else {
                 break;
             }

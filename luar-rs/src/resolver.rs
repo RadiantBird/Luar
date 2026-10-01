@@ -34,6 +34,8 @@ impl Resolver {
                     .push(definition.name.clone());
             }
             module_globals.extend(definition.globals);
+            // declare class で宣言されたクラス名は、修飾せずそのまま使う。
+            module_globals.extend(definition.classes.iter().map(|class| class.name.clone()));
         }
         for modules in module_members.values_mut() {
             modules.sort();

@@ -1,5 +1,7 @@
 use crate::Target;
 use crate::lexer::SourceSpan;
+use crate::rename;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -79,6 +81,8 @@ fn expand_with_path(
 ) -> Result<ExpandedSource, String> {
     let directory = source_path.parent().unwrap_or_else(|| Path::new(""));
     let mut output: Vec<(String, SourceOrigin)> = Vec::new();
+    // include元で使われている名前と、これまでに貼り付けたmoduleのトップレベル名。
+    let mut taken: Option<HashSet<String>> = None;
 
     for (index, line) in source.lines().enumerate() {
         let line_number = index + 1;
@@ -167,13 +171,34 @@ fn expand_with_path(
                 )
             })?;
         }
-        let (module_body, returned_name) =
+        let (module_body, mut returned_name) =
             remove_terminal_return(&included_source, &canonical_path)?;
 
         stack.push(canonical_path.clone());
         let expanded_body = expand_with_path(&module_body, &canonical_path, target, stack);
         stack.pop();
-        let expanded_body = expanded_body?;
+        let mut expanded_body = expanded_body?;
+
+        if extension == Some("luar") {
+            let taken = taken.get_or_insert_with(|| reserved_names(source));
+            taken.insert(declaration.name.to_string());
+            let renames = collision_renames(
+                &expanded_body.source,
+                &returned_name,
+                declaration.name,
+                taken,
+            );
+            if !renames.is_empty() {
+                expanded_body.source = rename::rename_identifiers(&expanded_body.source, &renames)
+                    .map_err(|message| error_at(source_path, line_number, &message))?;
+                if let Some(renamed) = renames.get(&returned_name) {
+                    returned_name = renamed.clone();
+                }
+            }
+            if let Some(names) = rename::top_level_names(&expanded_body.source) {
+                taken.extend(names);
+            }
+        }
 
         if extension == Some("lua") && target == Target::Lua54 {
             output.push((
@@ -219,6 +244,58 @@ fn expand_with_path(
     })
 }
 
+/// include元ファイルが束縛している名前。include宣言の行は束縛名だけを数える。
+/// 名前を使っているだけ(束縛していない)ものは、includeしたmoduleが提供する名前を
+/// 参照している可能性があるため、衝突とはみなさない。
+fn reserved_names(source: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let placeholder = source
+        .lines()
+        .map(|line| match parse_include_declaration(line) {
+            Some(declaration) => {
+                names.insert(declaration.name.to_string());
+                format!("local {} = nil", declaration.name)
+            }
+            None => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    names.extend(rename::bound_names(&placeholder).unwrap_or_default());
+    names
+}
+
+/// 貼り付けるmoduleのトップレベル名のうち、`taken` とぶつかるものの改名表。
+/// 改名先は `<元の名前>__<束縛名>`、使用済みなら `_2`, `_3`... を足す。
+/// moduleが `return` する名前が束縛名と同じ場合は、それ自体が束縛なので改名しない。
+fn collision_renames(
+    body: &str,
+    returned_name: &str,
+    binding: &str,
+    taken: &HashSet<String>,
+) -> HashMap<String, String> {
+    let mut renames = HashMap::new();
+    let Some(top_level) = rename::top_level_names(body) else {
+        return renames;
+    };
+    let mut unavailable = rename::referenced_names(body);
+    unavailable.extend(taken.iter().cloned());
+    for name in top_level {
+        let is_binding = name == returned_name && returned_name == binding;
+        if is_binding || !taken.contains(&name) || renames.contains_key(&name) {
+            continue;
+        }
+        let mut candidate = format!("{name}__{binding}");
+        let mut suffix = 2;
+        while unavailable.contains(&candidate) {
+            candidate = format!("{name}__{binding}_{suffix}");
+            suffix += 1;
+        }
+        unavailable.insert(candidate.clone());
+        renames.insert(name, candidate);
+    }
+    renames
+}
+
 fn raw_lua_marker(source: &str) -> String {
     let mut equals = String::new();
     while source.contains(&format!("]{equals}]")) {
@@ -252,6 +329,17 @@ fn reject_luau_incompatible_lua(
         ));
     }
     Ok(())
+}
+
+/// `local name = !include(...)` / `const name = !include(...)` が束縛する名前。
+/// `import type name` が `.luard` なしで済むかどうかの判定に使う。
+pub fn include_binding_names(source: &str) -> HashSet<String> {
+    source
+        .lines()
+        .filter_map(|line| {
+            parse_include_declaration(line).map(|declaration| declaration.name.to_string())
+        })
+        .collect()
 }
 
 struct IncludeDeclaration<'a> {

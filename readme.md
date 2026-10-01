@@ -18,7 +18,21 @@ Get-Command luar -All
 
 VS Code拡張はPATH上の`luar`へ未保存の本文を渡し、Rustコンパイラと同じ診断を表示する。別の実行ファイルを使う場合は`luar.compiler.path`、互換性検査の対象は`luar.target`（`luau`または`lua54`）で設定する。コンパイラが見つからない場合もハイライトと補完は利用できるが、意味診断は無効になる。
 
-拡張機能をVSIXから利用している場合、ソース変更後はビルドだけでなくVSIXの再生成と再インストールが必要になる。
+### 補完
+`.`(`:`)を打つと、VS Codeは`luar complete`でコンパイラのチェッカーへ問い合わせ、レシーバの型に応じたメンバーを種別(field/method/function)と型付きで提案する。識別子の補完は、その位置から見えるlocal・const・関数・クラス・モジュールを、種別(`local x: number`、`const NAME: string`など)と型付きで返す。外部から見えるのはpublicメンバーだけで、クラス自身(`Dog.`)にはstaticメソッドと`new`、インスタンス(`dog.`)にはフィールドとインスタンスメソッドが出る。
+
+```powershell
+luar complete --stdin --source-path main.luar --offset 123 < main.luar
+```
+
+`--offset`は文書先頭からのUTF-16コード単位のオフセットで、結果は`{"items":[{"label","kind","type","detail"}]}`のJSONである。入力途中で閉じ括弧が足りない場合も、補った版で解析する。コンパイラを呼べない・結果が空のときは、従来のこのファイル内の索引へフォールバックする。クラスのメソッド本体の中(`self.`など)の補完は未対応である。
+
+拡張機能をVSIXから利用している場合、ソース変更後はビルドだけでなくVSIXの再生成と再インストールが必要になる。次のスクリプトがVSIXの生成からインストールまでを行う。`-WithCompiler`を付けると`luar.exe`の更新も同時に行う。実行後はVS Codeを再読み込みする。
+
+```powershell
+.\tools\Update-LuarExtension.ps1
+.\tools\Update-LuarExtension.ps1 -WithCompiler
+```
 
 ```powershell
 cd .\luar-vscode
@@ -399,7 +413,20 @@ end
 
 * クラス直下およびフィールド定義は、インスタンス生成時に各インスタンスへコピーされる。
 
-* 子クラスは自動で親のnewを継承する。
+* `new`を宣言しないクラスには、コンパイラが引数なしのpublicなデフォルトコンストラクタ`new()`を生成する。フィールドの初期値だけが代入される。
+  `private`な`new`だけを宣言したクラスにはデフォルトコンストラクタを足さない。abstractクラスにも生成されるが、直接のインスタンス化は従来どおりエラーになる。
+
+```luau
+class Dog is
+    public is
+        name: string = "Pochi"
+    end
+end
+
+print(Dog.new().name) -- Pochi
+```
+
+* 子クラスは自動で親のnewを継承する。親（祖先）が`new`を宣言していなければ、親のデフォルトコンストラクタを呼んだうえで子のフィールド初期値を代入する。
 
 * operator関数はインスタンスメソッドとしてのみ定義可能である。
   staticとして宣言することはできない。(前述の通り)
@@ -483,6 +510,16 @@ print(hogehoge)
 
 `!include`は、相対パスの`.luar`をコンパイル前にインライン展開する。取り込むファイルは最後にテーブル変数を返す必要がある。
 
+`!include`だけでモジュールの型と全メンバーはソースから分かるため、`import type`も`.luard`も不要である。`import type`が必要になるのは、ソースが見えない実行時提供のモジュール(loveなど)と、未修飾名の自動修飾(`print(hogehoge)`→`mod.hogehoge`)を使うときだけである。同名の`!include`がある`import type`は`.luard`を要求せず、includeしたソースのトップレベルのテーブルから宣言を作る。`.luard`も`!include`もない`import type`は従来どおりエラーになる。
+
+```luau
+local clsdef = !include("./clsdef.luar")
+print(clsdef.dog.name) -- clsdef.dog: Dog, name: string と推論される
+```
+
+#### includeした名前の衝突
+展開したソースのトップレベルの名前(`local`/`const`/`function`/`class`)が、include元が束縛している名前(別の`!include`で取り込んだものを含む)と同じ場合、include側の名前だけを`<元の名前>__<束縛名>`へ自動で改名する(例: `module`→`module__clsdef`)。使われているだけで束縛されていない名前は、includeしたモジュールが提供する名前とみなして改名しない。メンバー名、テーブルのキー、ラベル、文字列、クラスのメンバー宣言名は改名されない。改名が必要な名前がテンプレート文字列の`{}`内で使われている場合は、安全に改名できないためコンパイルエラーになる。
+
 ```luau
 -- mod.luar
 local mod = {}
@@ -532,7 +569,24 @@ declare global workspace: workspace
 ```
 
 `.luard`に記述できるものは、コメント、空行、`declare name: Type`、
-`declare global name: Type`だけである。関数値は `declare run: (Arg1, Arg2) -> Return` と宣言し、引数・戻り値がない関数は `declare run: () -> ()` と書く。`.luar`本体に`declare`を書くことはできない。
+`declare global name: Type`、`declare class`だけである。関数値は `declare run: (Arg1, Arg2) -> Return` と宣言し、引数・戻り値がない関数は `declare run: () -> ()` と書く。`.luar`本体に`declare`を書くことはできない。
+
+#### declare class
+ソースのないクラス(C/C++バインドなど)にも、補完と静的検査を効かせるために`declare class`でクラスの形を宣言できる。メンバーはすべてpublicで、本体を持たない。継承は`is Parent`だけ書ける。
+
+```luau
+declare class Dog
+    name: string
+    function bark(times: number): string
+    static function create(): Dog
+end
+declare dog: Dog
+```
+
+`declare name: Type`の`Type`にはクラス名を書ける。宣言したクラス名は修飾せずそのまま使え、実行時コードは生成されない。`import type ext`したあとで`local ext = require(...)`と実体を束縛しても、`.luard`が宣言した型は保たれる。
+
+### 型推論の範囲
+テーブルリテラル`{ dog = Dog.new() }`は、フィールド名と型が分かるテーブルとして扱う。`local m = {}`のあとの再代入や`m.x = 1`、`function m.run()`でも形が更新される。`obj.field`は、形が分かるテーブルとクラスのインスタンスに対して型を返し、メソッド呼び出しは戻り値の型注釈があるときだけ型が確定する。判断できないものは`any`相当(Unknown)のままで、外部runtime由来の値を推論だけで拒否することはない。フィールド型は注釈があればそれを、なければ`"Pochi"`のようなリテラルから推論する。
 
 ### 名前の衝突
 ```luau

@@ -492,3 +492,81 @@ end
             .contains("unsupported overloaded operator")
     );
 }
+
+#[test]
+fn class_without_constructor_gets_default_new_with_field_defaults() {
+    let output = compile(
+        r#"
+class Dog is
+    public is
+        name:string = "Pochi"
+    end
+end
+
+local dog = Dog.new()
+"#,
+    )
+    .expect("a class without `new` should get a default constructor");
+
+    assert!(output.contains("function Dog.new()"));
+    assert!(output.contains("local self = setmetatable({}, Dog)"));
+    assert!(output.contains("self.name = \"Pochi\""));
+    assert!(output.contains("return self"));
+}
+
+#[test]
+fn child_of_class_without_constructor_chains_default_new() {
+    let output = compile(
+        r#"
+class Base is
+    year = 1901
+end
+
+class Child is Base
+    label = "child"
+end
+
+local child = Child.new()
+"#,
+    )
+    .expect("children of a class without `new` should compile");
+
+    assert!(output.contains("function Base.new()"));
+    assert!(output.contains("function Child.new()"));
+    assert!(output.contains("local self = Base.new()"));
+    assert!(output.contains("setmetatable(self, Child)"));
+    assert!(output.contains("self.label = \"child\""));
+}
+
+#[test]
+fn abstract_class_without_constructor_gets_default_new() {
+    let output = compile(
+        r#"
+class Base is abstract
+    year = 1901
+end
+"#,
+    )
+    .expect("abstract class should compile");
+
+    assert!(output.contains("function Base.new()"));
+}
+
+#[test]
+fn private_only_constructor_suppresses_default_new() {
+    let output = compile(
+        r#"
+class Single is
+    private is
+        static function new()
+            self.value = 1
+        end
+    end
+end
+"#,
+    )
+    .expect("private constructor should compile");
+
+    assert!(output.contains("local function new()"));
+    assert!(!output.contains("function Single.new"));
+}

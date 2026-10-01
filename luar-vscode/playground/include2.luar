@@ -1,0 +1,3 @@
+local clsdef = !include("./clsdef.luar")
+
+print(clsdef.dog.name)

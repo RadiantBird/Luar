@@ -1,6 +1,7 @@
+use luar_rs::completion::CompletionReport;
 use luar_rs::{
     CompileOptions, Diagnostic, DiagnosticReport, Target, analyze_source_with_options,
-    compile_source_with_options, dump_ir,
+    complete_source_with_options, compile_source_with_options, dump_ir,
 };
 use std::env;
 use std::fs;
@@ -17,6 +18,7 @@ Usage:
   luar check [--target luau|lua54] <input.luar>
   luar check [--target luau|lua54] --stdin --source-path <path> [--diagnostic-format json]
   luar dump-ir [--target luau|lua54] <input.luar>
+  luar complete [--target luau|lua54] --stdin --source-path <path> --offset <utf16-offset>
   luar help
 
 The default target is luau. Output extensions do not select a target.";
@@ -26,6 +28,7 @@ enum Command {
     Compile,
     Check,
     DumpIr,
+    Complete,
 }
 
 struct Cli {
@@ -34,6 +37,7 @@ struct Cli {
     stdin: bool,
     source_path: Option<PathBuf>,
     json: bool,
+    offset: Option<usize>,
     positional: Vec<PathBuf>,
 }
 
@@ -99,6 +103,16 @@ fn run() -> Result<(), ()> {
                 .map_err(|diagnostics| print_diagnostics(&diagnostics, cli.json))?;
             print!("{output}");
         }
+        Command::Complete => {
+            let offset = cli.offset.expect("validated offset");
+            let items = complete_source_with_options(&source, offset, &options).map_err(|message| {
+                eprintln!("luar: cannot complete: {message}");
+            })?;
+            serde_json::to_writer(io::stdout(), &CompletionReport { items }).map_err(|error| {
+                eprintln!("luar: cannot write JSON completions: {error}");
+            })?;
+            println!();
+        }
     }
     Ok(())
 }
@@ -108,12 +122,14 @@ fn parse_cli(arguments: &[String]) -> Result<Cli, String> {
         "compile" => Command::Compile,
         "check" => Command::Check,
         "dump-ir" => Command::DumpIr,
+        "complete" => Command::Complete,
         command => return Err(format!("unknown command '{command}'")),
     };
     let mut target = Target::Luau;
     let mut stdin = false;
     let mut source_path = None;
     let mut json = false;
+    let mut offset = None;
     let mut positional = Vec::new();
     let mut index = 1;
     while index < arguments.len() {
@@ -130,6 +146,15 @@ fn parse_cli(arguments: &[String]) -> Result<Cli, String> {
                     .get(index)
                     .ok_or("--source-path requires a value")?;
                 source_path = Some(PathBuf::from(value));
+            }
+            "--offset" => {
+                index += 1;
+                let value = arguments.get(index).ok_or("--offset requires a value")?;
+                offset = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| format!("invalid --offset '{value}'"))?,
+                );
             }
             "--diagnostic-format" => {
                 index += 1;
@@ -151,9 +176,16 @@ fn parse_cli(arguments: &[String]) -> Result<Cli, String> {
         index += 1;
     }
 
+    if command == Command::Complete {
+        if !stdin || offset.is_none() {
+            return Err("'complete' requires --stdin, --source-path and --offset".to_string());
+        }
+    } else if offset.is_some() {
+        return Err("--offset is only valid with 'complete'".to_string());
+    }
     if stdin {
-        if command != Command::Check {
-            return Err("--stdin is currently supported only by 'check'".to_string());
+        if !matches!(command, Command::Check | Command::Complete) {
+            return Err("--stdin is currently supported only by 'check' and 'complete'".to_string());
         }
         if source_path.is_none() {
             return Err("--stdin requires --source-path for module/include resolution".to_string());
@@ -178,6 +210,7 @@ fn parse_cli(arguments: &[String]) -> Result<Cli, String> {
         stdin,
         source_path,
         json,
+        offset,
         positional,
     })
 }

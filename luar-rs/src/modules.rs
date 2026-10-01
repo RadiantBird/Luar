@@ -1,13 +1,36 @@
+use crate::ast::{Param, TypeExpr};
 use crate::lexer::{Lexer, Token, TokenKind};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
+/// `.luard` の `declare class` が宣言するメソッド。本体は持たない。
 #[derive(Debug, Clone)]
+pub struct DeclaredMethod {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub return_type: Option<TypeExpr>,
+    pub is_static: bool,
+}
+
+/// `.luard` の `declare class`。メンバーはすべてpublic。
+#[derive(Debug, Clone)]
+pub struct DeclaredClass {
+    pub name: String,
+    pub parent: Option<String>,
+    pub fields: Vec<(String, TypeExpr)>,
+    pub methods: Vec<DeclaredMethod>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct ModuleDefinition {
     pub name: String,
     pub members: HashSet<String>,
     pub globals: HashSet<String>,
+    /// `members` / `globals` の型。宣言順。
+    pub member_types: Vec<(String, TypeExpr)>,
+    pub global_types: Vec<(String, TypeExpr)>,
+    pub classes: Vec<DeclaredClass>,
 }
 
 #[derive(Debug, Clone)]
@@ -16,12 +39,16 @@ pub struct ModuleError {
     pub line: usize,
 }
 
+pub fn definition_path(module_name: &str, source_path: &Path) -> std::path::PathBuf {
+    let directory = source_path.parent().unwrap_or_else(|| Path::new(""));
+    directory.join(format!("{module_name}.luard"))
+}
+
 pub fn load_definition(
     module_name: &str,
     source_path: &Path,
 ) -> Result<ModuleDefinition, ModuleError> {
-    let directory = source_path.parent().unwrap_or_else(|| Path::new(""));
-    let definition_path = directory.join(format!("{module_name}.luard"));
+    let definition_path = definition_path(module_name, source_path);
     let bytes = fs::read(&definition_path).map_err(|error| ModuleError {
         message: format!(
             "cannot read module definition '{}': {error}",
@@ -56,21 +83,37 @@ pub fn parse_definition(
     };
     let mut members = HashSet::new();
     let mut globals = HashSet::new();
+    let mut member_types = Vec::new();
+    let mut global_types = Vec::new();
+    let mut classes = Vec::new();
     let mut all_names = HashSet::new();
 
     while !parser.at(TokenKind::Eof) {
         parser.expect(TokenKind::Declare, "'declare'")?;
+        if parser.at(TokenKind::Class) {
+            let class = parser.parse_declared_class()?;
+            if !all_names.insert(class.name.clone()) {
+                return Err(parser.error(
+                    parser.previous_line(),
+                    format!("name '{}' is declared more than once", class.name),
+                ));
+            }
+            classes.push(class);
+            continue;
+        }
         let is_global = parser.take(TokenKind::Global);
         let (name, line) = parser.expect_ident()?;
         parser.expect(TokenKind::Colon, "':'")?;
-        parser.parse_definition_type()?;
+        let ty = parser.parse_definition_type()?;
         if !all_names.insert(name.clone()) {
             return Err(parser.error(line, format!("name '{name}' is declared more than once")));
         }
         if is_global {
-            globals.insert(name);
+            globals.insert(name.clone());
+            global_types.push((name, ty));
         } else {
-            members.insert(name);
+            members.insert(name.clone());
+            member_types.push((name, ty));
         }
     }
 
@@ -78,6 +121,9 @@ pub fn parse_definition(
         name: module_name.to_string(),
         members,
         globals,
+        member_types,
+        global_types,
+        classes,
     })
 }
 
@@ -129,20 +175,129 @@ impl DefinitionParser<'_> {
         }
     }
 
+    fn previous_line(&self) -> usize {
+        self.pos
+            .checked_sub(1)
+            .map(|index| self.tokens[index].line)
+            .unwrap_or(0)
+    }
+
+    /// `declare class Name [is Parent] ... end` を読む。呼び出し時点で `class` の前。
+    /// メンバーは `name: Type` のフィールドと、本体のない
+    /// `[static] function name(params)[: Return]` で、`end` で閉じる。
+    fn parse_declared_class(&mut self) -> Result<DeclaredClass, ModuleError> {
+        self.expect(TokenKind::Class, "'class'")?;
+        let (name, _) = self.expect_ident()?;
+        let parent = if self.take(TokenKind::Is) {
+            Some(self.expect_ident()?.0)
+        } else {
+            None
+        };
+        let mut fields: Vec<(String, TypeExpr)> = Vec::new();
+        let mut methods: Vec<DeclaredMethod> = Vec::new();
+        while !self.take(TokenKind::End) {
+            if self.at(TokenKind::Eof) {
+                return Err(self.error(
+                    self.token().line,
+                    format!("expected 'end' to close 'declare class {name}'"),
+                ));
+            }
+            let is_static = self.take(TokenKind::Static);
+            if self.take(TokenKind::Function) {
+                let (method_name, line) = self.expect_ident()?;
+                self.expect(TokenKind::LParen, "'('")?;
+                let params = self.parse_declared_params()?;
+                self.expect(TokenKind::RParen, "')'")?;
+                let return_type = if self.take(TokenKind::Colon) {
+                    Some(self.parse_definition_type()?)
+                } else {
+                    None
+                };
+                if methods.iter().any(|method| method.name == method_name)
+                    || fields.iter().any(|(field, _)| *field == method_name)
+                {
+                    return Err(self.error(
+                        line,
+                        format!("member '{method_name}' is declared more than once in '{name}'"),
+                    ));
+                }
+                methods.push(DeclaredMethod {
+                    name: method_name,
+                    params,
+                    return_type,
+                    is_static,
+                });
+                continue;
+            }
+            if is_static {
+                return Err(self.error(
+                    self.token().line,
+                    "'static' can only be used before 'function'".to_string(),
+                ));
+            }
+            let (field_name, line) = self.expect_ident()?;
+            self.expect(TokenKind::Colon, "':'")?;
+            let ty = self.parse_definition_type()?;
+            if methods.iter().any(|method| method.name == field_name)
+                || fields.iter().any(|(field, _)| *field == field_name)
+            {
+                return Err(self.error(
+                    line,
+                    format!("member '{field_name}' is declared more than once in '{name}'"),
+                ));
+            }
+            fields.push((field_name, ty));
+        }
+        Ok(DeclaredClass {
+            name,
+            parent,
+            fields,
+            methods,
+        })
+    }
+
+    fn parse_declared_params(&mut self) -> Result<Vec<Param>, ModuleError> {
+        let mut params = Vec::new();
+        if self.at(TokenKind::RParen) {
+            return Ok(params);
+        }
+        loop {
+            if self.take(TokenKind::DotDotDot) {
+                params.push(Param::Vararg);
+            } else {
+                let (name, _) = self.expect_ident()?;
+                let ty = if self.take(TokenKind::Colon) {
+                    Some(self.parse_definition_type()?)
+                } else {
+                    None
+                };
+                params.push(Param::Named { name, ty });
+            }
+            if !self.take(TokenKind::Comma) {
+                return Ok(params);
+            }
+        }
+    }
+
     /// Parses the type grammar accepted by `.luard` files.  This intentionally
     /// remains separate from Luar's general `TypeExpr`: function types are a
-    /// declaration-file feature for now.
-    fn parse_definition_type(&mut self) -> Result<(), ModuleError> {
-        if self.take(TokenKind::LParen) {
-            self.parse_definition_type_list()?;
+    /// declaration-file feature for now, and are represented as `function`.
+    fn parse_definition_type(&mut self) -> Result<TypeExpr, ModuleError> {
+        let mut ty = if self.take(TokenKind::LParen) {
+            let list = self.parse_definition_type_list()?;
             self.expect(TokenKind::RParen, "')'")?;
             if self.take(TokenKind::Arrow) {
                 self.parse_definition_type()?;
+                TypeExpr::Name("function".to_string())
+            } else {
+                TypeExpr::Tuple(list)
             }
         } else {
-            self.expect_ident()?;
+            TypeExpr::Name(self.expect_ident()?.0)
+        };
+        if self.take(TokenKind::Question) {
+            ty = TypeExpr::Optional(Box::new(ty));
         }
-        self.take(TokenKind::Question);
         if self.at(TokenKind::Arrow) {
             return Err(self.error(
                 self.token().line,
@@ -150,19 +305,20 @@ impl DefinitionParser<'_> {
                     .to_string(),
             ));
         }
-        Ok(())
+        Ok(ty)
     }
 
-    fn parse_definition_type_list(&mut self) -> Result<(), ModuleError> {
+    fn parse_definition_type_list(&mut self) -> Result<Vec<TypeExpr>, ModuleError> {
+        let mut list = Vec::new();
         if self.at(TokenKind::RParen) {
-            return Ok(());
+            return Ok(list);
         }
 
-        self.parse_definition_type()?;
+        list.push(self.parse_definition_type()?);
         while self.take(TokenKind::Comma) {
-            self.parse_definition_type()?;
+            list.push(self.parse_definition_type()?);
         }
-        Ok(())
+        Ok(list)
     }
 
     fn error(&self, line: usize, message: String) -> ModuleError {

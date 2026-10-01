@@ -39,6 +39,17 @@ describe("VS Code module definitions", () => {
     expect(result.errors[2]?.message).toContain("expected type");
   });
 
+  it("skips declare class blocks without reporting syntax errors", () => {
+    const source = "declare class Dog\n    name: string\n    function bark(times: number): string\n    static function create(): Dog\nend\ndeclare dog: Dog\n";
+    const result = parseModuleDefinition("clsdef", source);
+
+    expect(result.errors).toEqual([]);
+    expect(result.definition?.members.map((member) => member.name)).toEqual(["dog"]);
+
+    const unclosed = parseModuleDefinition("clsdef", "declare class Dog\n    name: string\n");
+    expect(unclosed.errors[0]?.message).toContain("expected 'end'");
+  });
+
   it("indexes module members while the source is incomplete after a dot", () => {
     const definition = parseModuleDefinition("qaz", "declare wsx: string\n").definition!;
     const index = indexDocument("import type qaz\nqaz.", [definition]);

@@ -1,0 +1,12 @@
+local module = {}
+class Dog is
+    public is
+        name:string = "Pochi"
+    end
+end
+
+module = {
+    dog = Dog.new()
+}
+
+return module

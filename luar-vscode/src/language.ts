@@ -95,6 +95,19 @@ export function parseModuleDefinition(moduleName: string, source: string, filePa
       break;
     }
     pos++;
+    if (tokens[pos]?.kind === "class") {
+      // `declare class Name ... end`: 補完はコンパイラ側で行うので、エディタ側は
+      // 構文エラーにならないよう、対応する `end` まで読み飛ばす。
+      const open = tokens[pos]!;
+      let closing = pos + 1;
+      while (tokens[closing] && tokens[closing]!.kind !== "end" && tokens[closing]!.kind !== "EOF") closing++;
+      if (!tokens[closing] || tokens[closing]!.kind === "EOF") {
+        errors.push(moduleError(filePath, open.line, open.col, "expected 'end' to close 'declare class'"));
+        break;
+      }
+      pos = closing + 1;
+      continue;
+    }
     const isGlobal = tokens[pos]?.kind === "global";
     if (isGlobal) pos++;
     const name = tokens[pos];

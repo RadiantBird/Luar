@@ -553,3 +553,159 @@ fn include_requires_a_source_path() {
     let errors = compile_source("local mod = !include(\"./mod.luar\")", None).unwrap_err();
     assert_error(&errors, "require compile_source with a source file path");
 }
+
+#[test]
+fn include_works_without_import_type_or_definition_file() {
+    let project = TempProject::new();
+    project.source(
+        "clsdef.luar",
+        "local module = {}\nclass Dog is\n    public is\n        name:string = \"Pochi\"\n    end\nend\n\nmodule = {\n    dog = Dog.new()\n}\n\nreturn module\n",
+    );
+    let main = project.source(
+        "main.luar",
+        "local clsdef = !include(\"./clsdef.luar\")\nprint(clsdef.dog.name)\n",
+    );
+    let source = fs::read_to_string(&main).unwrap();
+    let output = compile_at(&source, &main).expect("include alone must be enough");
+    assert!(output.contains("function Dog.new()"));
+    assert!(output.contains("self.name = \"Pochi\""));
+    assert!(output.contains("print(clsdef.dog.name)"));
+}
+
+#[test]
+fn import_type_of_an_included_module_needs_no_definition_file() {
+    let project = TempProject::new();
+    project.source(
+        "mod.luar",
+        "local mod = {}\nmod.hogehoge = \"gepyaaa\"\nfunction mod.run()\nend\nreturn mod\n",
+    );
+    let main = project.source(
+        "main.luar",
+        "import type mod\nlocal mod = !include(\"./mod.luar\")\nmod.run()\nprint(hogehoge)\n",
+    );
+    let source = fs::read_to_string(&main).unwrap();
+    let output = compile_at(&source, &main).expect("included source provides the declarations");
+    assert!(output.contains("print(mod.hogehoge)"), "{output}");
+}
+
+#[test]
+fn import_type_without_definition_or_include_is_still_an_error() {
+    let project = TempProject::new();
+    let main = project.source("main.luar", "import type nothing\nprint(1)\n");
+    let source = fs::read_to_string(&main).unwrap();
+    let errors = compile_at(&source, &main).unwrap_err();
+    assert_error(&errors, "cannot read module definition");
+}
+
+const DOG_INCLUDE: &str = "local module = {}\nclass Dog is\n    public is\n        name:string = \"Pochi\"\n    end\nend\n\nmodule = {\n    dog = Dog.new()\n}\n\nreturn module\n";
+
+#[test]
+fn include_renames_names_that_collide_with_the_including_file() {
+    let project = TempProject::new();
+    project.source("clsdef.luar", DOG_INCLUDE);
+    let main = project.source(
+        "main.luar",
+        "local module = 1\nclass Dog is\nend\nlocal clsdef = !include(\"./clsdef.luar\")\nprint(module, clsdef.dog.name)\n",
+    );
+    let source = fs::read_to_string(&main).unwrap();
+    let output = compile_at(&source, &main).expect("colliding names must be renamed");
+    assert!(output.contains("local module__clsdef = {}"), "{output}");
+    assert!(output.contains("function Dog__clsdef.new()"), "{output}");
+    assert!(output.contains("module__clsdef = { dog = Dog__clsdef.new() }"), "{output}");
+    assert!(output.contains("local clsdef = module__clsdef"), "{output}");
+    assert!(output.contains("print(module, clsdef.dog.name)"), "{output}");
+    assert!(output.contains("local Dog = {}"), "main's own class keeps its name: {output}");
+}
+
+#[test]
+fn include_does_not_rename_when_nothing_collides() {
+    let project = TempProject::new();
+    project.source("clsdef.luar", DOG_INCLUDE);
+    let main = project.source(
+        "main.luar",
+        "local clsdef = !include(\"./clsdef.luar\")\nlocal d = Dog.new()\nprint(clsdef.dog.name)\n",
+    );
+    let source = fs::read_to_string(&main).unwrap();
+    let output = compile_at(&source, &main).unwrap();
+    assert!(output.contains("local module = {}"), "{output}");
+    assert!(output.contains("local Dog = {}"), "{output}");
+    assert!(output.contains("local d = Dog.new()"), "using a leaked name is not a collision: {output}");
+    assert!(!output.contains("__clsdef"), "{output}");
+}
+
+#[test]
+fn two_includes_with_the_same_internal_names_do_not_collide() {
+    let project = TempProject::new();
+    project.source("a.luar", "local module = { id = \"a\" }\nreturn module\n");
+    project.source("b.luar", "local module = { id = \"b\" }\nreturn module\n");
+    let main = project.source(
+        "main.luar",
+        "local a = !include(\"./a.luar\")\nlocal b = !include(\"./b.luar\")\nprint(a.id, b.id)\n",
+    );
+    let source = fs::read_to_string(&main).unwrap();
+    let output = compile_at(&source, &main).unwrap();
+    assert!(output.contains("local module = { id = \"a\" }"), "{output}");
+    assert!(output.contains("local module__b = { id = \"b\" }"), "{output}");
+    assert!(output.contains("local b = module__b"), "{output}");
+}
+
+#[test]
+fn colliding_name_used_in_a_template_string_is_reported() {
+    let project = TempProject::new();
+    project.source(
+        "m.luar",
+        "local label = \"x\"\nlocal m = { text = `{label}` }\nreturn m\n",
+    );
+    let main = project.source(
+        "main.luar",
+        "local label = 1\nlocal m = !include(\"./m.luar\")\n",
+    );
+    let source = fs::read_to_string(&main).unwrap();
+    let errors = compile_at(&source, &main).unwrap_err();
+    assert_error(&errors, "template string");
+}
+
+const DOG_LUARD: &str = "declare class Dog\n    name: string\n    function bark(times: number): string\n    static function create(): Dog\nend\ndeclare dog: Dog\ndeclare run: (Dog) -> ()\n";
+
+fn compile_with_dog_luard(tail: &str) -> Result<String, Vec<String>> {
+    let project = TempProject::new();
+    project.definition("clsdef", DOG_LUARD);
+    let main = project.source("main.luar", "import type clsdef\nlocal clsdef = require(\"./clsdef\")\n");
+    let source = format!("import type clsdef\nlocal clsdef = require(\"./clsdef\")\n{tail}");
+    compile_at(&source, &main)
+}
+
+#[test]
+fn luard_declare_class_types_module_members() {
+    compile_with_dog_luard(
+        "local n: string = clsdef.dog.name\nlocal d: Dog = clsdef.dog\nlocal s: string = clsdef.dog.bark(1)\nclsdef.run(d)\nlocal made = Dog.create()\n",
+    )
+    .expect("declared members should type-check");
+
+    let errors = compile_with_dog_luard("local n: number = clsdef.dog.name\n").unwrap_err();
+    assert_error(&errors, "cannot assign string to 'n: number'");
+    let errors = compile_with_dog_luard("local n: number = clsdef.dog.bark(1)\n").unwrap_err();
+    assert_error(&errors, "cannot assign string to 'n: number'");
+}
+
+#[test]
+fn luard_declare_class_emits_no_runtime_code() {
+    let output = compile_with_dog_luard("local d: Dog = clsdef.dog\n").unwrap();
+    assert!(!output.contains("Dog"), "{output}");
+}
+
+#[test]
+fn luard_declare_class_errors_are_reported() {
+    let project = TempProject::new();
+    project.definition("broken", "declare class Dog\n    name: string\n");
+    let main = project.source("main.luar", "import type broken\n");
+    let errors = compile_at("import type broken\n", &main).unwrap_err();
+    assert_error(&errors, "expected 'end' to close 'declare class Dog'");
+
+    project.definition(
+        "dup",
+        "declare class Dog\n    name: string\n    function name()\nend\n",
+    );
+    let errors = compile_at("import type dup\n", &main).unwrap_err();
+    assert_error(&errors, "member 'name' is declared more than once in 'Dog'");
+}
