@@ -20,6 +20,8 @@ struct ClassInfo {
     parent_name: Option<String>,
     methods: HashMap<String, MethodInfo>,
     fields: HashMap<String, FieldInfo>,
+    /// このクラスのprivateメンバーへのアクセスを許可したクラス。継承されない。
+    friends: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -472,6 +474,14 @@ impl Checker {
                     if name == "new" {
                         if let Expr::Ident { name: class, .. } = obj.as_ref() {
                             if self.classes.contains_key(class) {
+                                // `static function new(): Part?` のように戻り値が宣言されていれば、それを使う。
+                                let declared = self.method_return_type(
+                                    &ValueType::Class(class.clone()),
+                                    "new",
+                                );
+                                if declared != ValueType::Unknown {
+                                    return declared;
+                                }
                                 return ValueType::Class(class.clone());
                             }
                         }
@@ -926,12 +936,17 @@ impl Checker {
     // ─── Pass 1: Registration ─────────────────────────────────────────────────
 
     fn register_declared_class(&mut self, class: &DeclaredClass) {
+        if let Some(decl) = &class.decl {
+            self.register_class(decl);
+            return;
+        }
         let mut info = ClassInfo {
             name: class.name.clone(),
             is_abstract: false,
             parent_name: class.parent.clone(),
             methods: HashMap::new(),
             fields: HashMap::new(),
+            friends: Vec::new(),
         };
         for (name, ty) in &class.fields {
             info.fields.insert(
@@ -985,6 +1000,7 @@ impl Checker {
             parent_name: decl.parent.clone(),
             methods: HashMap::new(),
             fields: HashMap::new(),
+            friends: decl.friends.clone(),
         };
         let mut member_names = HashSet::new();
         for (access, member) in Self::flatten_members(decl) {
@@ -1045,6 +1061,14 @@ impl Checker {
 
     fn check_class(&mut self, decl: &ClassDecl) {
         self.check_inheritance(decl);
+        for friend in &decl.friends {
+            if !self.classes.contains_key(friend) {
+                self.err(
+                    format!("unknown friend class '{}' in class '{}'", friend, decl.name),
+                    decl.line,
+                );
+            }
+        }
         let members = Self::flatten_members(decl);
         let info_clone = self.classes.get(&decl.name).cloned();
         if let Some(info) = info_clone {
@@ -1608,6 +1632,20 @@ impl Checker {
         None
     }
 
+    /// privateメンバーは、所有クラス自身と、そのクラスが friend に指定したクラスだけが使える。
+    fn can_access_private(&self, current_class: Option<&str>, owner: &str) -> bool {
+        match current_class {
+            Some(current) => {
+                current == owner
+                    || self
+                        .classes
+                        .get(owner)
+                        .is_some_and(|info| info.friends.iter().any(|friend| friend == current))
+            }
+            None => false,
+        }
+    }
+
     fn check_member_use(
         &mut self,
         receiver: &ReceiverKind,
@@ -1621,7 +1659,8 @@ impl Checker {
         };
 
         if let Some(method) = self.lookup_method_in_ancestors(member_name, class_name) {
-            if method.access == Access::Private && current_class != Some(method.class_name.as_str())
+            if method.access == Access::Private
+                && !self.can_access_private(current_class, &method.class_name)
             {
                 self.err(
                     format!(
@@ -1652,7 +1691,9 @@ impl Checker {
         }
 
         if let Some(field) = self.lookup_field_in_ancestors(member_name, class_name) {
-            if field.access == Access::Private && current_class != Some(field.class_name.as_str()) {
+            if field.access == Access::Private
+                && !self.can_access_private(current_class, &field.class_name)
+            {
                 self.err(
                     format!(
                         "cannot access private field '{}' of class '{}' from outside",

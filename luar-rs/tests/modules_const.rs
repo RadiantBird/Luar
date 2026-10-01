@@ -709,3 +709,54 @@ fn luard_declare_class_errors_are_reported() {
     let errors = compile_at("import type dup\n", &main).unwrap_err();
     assert_error(&errors, "member 'name' is declared more than once in 'Dog'");
 }
+
+const PART_LUARD: &str = "declare class Part is\n    friend class Instance\n    public is\n        Anchored = false\n        CanCollide = true\n    end\n\n    private is\n        static function new()\n            \n        end\n    end\nend\n\ndeclare class Instance is\n    public is\n        static function new(name: string)\n            if name == \"Part\" then\n                return Part.new()\n            else\n                print(`unknown class: {name}`)\n                return nil\n            end\n        end\n    end\nend\n";
+
+#[test]
+fn luard_declare_class_with_bodies_friends_and_access_blocks() {
+    let project = TempProject::new();
+    project.definition("Part", PART_LUARD);
+    let main = project.source("main.luar", "");
+    let source = "import type Part\n\nfunction main()\n    if part := Instance.new(\"Part\") then\n        print(part.Anchored)\n        part.Anchored = true\n        print(part.Anchored)\n    end\nend\nmain()\n";
+    let output = compile_at(source, &main).expect("the declaration sample should compile");
+    assert!(output.contains("Instance.new(\"Part\")"), "{output}");
+    assert!(!output.contains("class") && !output.contains("setmetatable"), "no runtime code for declarations: {output}");
+}
+
+#[test]
+fn luard_declared_private_members_are_not_accessible_from_outside() {
+    let project = TempProject::new();
+    project.definition("Part", PART_LUARD);
+    let main = project.source("main.luar", "");
+    let errors = compile_at("import type Part\nlocal p = Part.new()\n", &main).unwrap_err();
+    assert_error(&errors, "cannot access private method 'new' of class 'Part'");
+}
+
+#[test]
+fn luard_declare_class_body_syntax_errors_are_reported() {
+    let project = TempProject::new();
+    project.definition("Broken", "declare class Broken is\n    public is\n        static function new(\n    end\nend\n");
+    let main = project.source("main.luar", "");
+    let errors = compile_at("import type Broken\n", &main).unwrap_err();
+    assert_error(&errors, "Broken.luard");
+}
+
+#[test]
+fn luard_declare_class_accepts_bodyless_methods_and_types_the_result() {
+    let project = TempProject::new();
+    project.definition(
+        "Part",
+        "declare class Part is\n    friend class Instance\n    public is\n        Anchored = false\n        CanCollide = true\n    end\n\n    private is\n        static function new(): Part\n    end\nend\n\ndeclare class Instance is\n    public is\n        static function new(name: string): Part?\n    end\nend",
+    );
+    let main = project.source("main.luar", "");
+    let source = "import type Part\n\nfunction main()\n    if part := Instance.new(\"Part\") then\n        print(part.Anchored)\n        part.Anchored = true\n        print(part.Anchored)\n    end\nend\nmain()\n";
+    let output = compile_at(source, &main).expect("bodyless declaration should compile");
+    assert!(output.contains("Instance.new(\"Part\")"), "{output}");
+
+    let errors = compile_at(
+        "import type Part\nlocal p: number = Instance.new(\"Part\")\n",
+        &main,
+    )
+    .unwrap_err();
+    assert_error(&errors, "cannot assign Part? to 'p: number'");
+}

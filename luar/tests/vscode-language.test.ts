@@ -50,6 +50,38 @@ describe("VS Code module definitions", () => {
     expect(unclosed.errors[0]?.message).toContain("expected 'end'");
   });
 
+  it("skips class-syntax declare class blocks with bodies and friends", () => {
+    const source = "declare class Part is\n    friend class Instance\n    public is\n        Anchored = false\n    end\n    private is\n        static function new()\n            if true then\n                return 1\n            end\n        end\n    end\nend\ndeclare version: string\n";
+    const result = parseModuleDefinition("Part", source);
+
+    expect(result.errors).toEqual([]);
+    expect(result.definition?.members.map((member) => member.name)).toEqual(["version"]);
+  });
+
+  it("skips declare class blocks whose methods have no body", () => {
+    const source = [
+      "declare class Part is",
+      "    friend class Instance",
+      "    public is",
+      "        Anchored = false",
+      "    end",
+      "    private is",
+      "        static function new(): Part",
+      "    end",
+      "end",
+      "",
+      "declare class Instance is",
+      "    public is",
+      "        static function new(name: string): Part?",
+      "    end",
+      "end",
+    ].join("\n");
+    const result = parseModuleDefinition("Part", source);
+
+    expect(result.errors).toEqual([]);
+    expect(result.definition?.members).toEqual([]);
+  });
+
   it("indexes module members while the source is incomplete after a dot", () => {
     const definition = parseModuleDefinition("qaz", "declare wsx: string\n").definition!;
     const index = indexDocument("import type qaz\nqaz.", [definition]);

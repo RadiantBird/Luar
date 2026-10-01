@@ -434,6 +434,27 @@ print(Dog.new().name) -- Pochi
 * 演算子オーバーロード関数で想定していた型と異なる引数が渡された場合、
   false, nil, 0のいずれかを返すのが望ましい。
 
+* `friend class X`をクラス直下に書くと、クラスXにこのクラスのprivateメソッド・フィールド(private `new`を含む)へのアクセスを許可する。
+  許可は片方向で、継承されない(Xの子クラスは許可されない)。`friend`は`friend class`と続くときだけキーワードで、それ以外では通常の識別子として使える。存在しないクラスを指定するとエラーになる。
+  friendが指定されたクラスのprivateメソッドは、他のクラスから呼べるようクラステーブルにも載せて出力する(`Vault.audit = audit`)。
+
+```luau
+class Vault is
+    friend class Teller
+    private is
+        balance = 10
+    end
+end
+
+class Teller is
+    public is
+        function peek(): number
+            return Vault.new().balance -- friendなのでOK
+        end
+    end
+end
+```
+
 * public / privateによるアクセス制御はコンパイル時にのみ適用される。
   実行時には追加のオーバーヘッドは発生しない（ゼロオーバーヘッド抽象化）。
 
@@ -581,6 +602,40 @@ declare class Dog
     static function create(): Dog
 end
 declare dog: Dog
+```
+
+`class Name is`と同じ構文(`is`あり)でも書ける。この形式ではpublic/privateブロック、メソッド本体、`friend`をそのまま使える。本体は構文だけ検査し、コードは生成しない。privateメンバーは外部から使えず、補完にも出ない。
+
+```luau
+-- Part.luard
+declare class Part is
+    friend class Instance
+    public is
+        Anchored = false
+        CanCollide = true
+    end
+    private is
+        static function new()
+        end
+    end
+end
+
+declare class Instance is
+    public is
+        static function new(name: string)
+            return Part.new()
+        end
+    end
+end
+```
+
+```luau
+-- main.luar
+import type Part
+
+if part := Instance.new("Part") then
+    part.Anchored = true
+end
 ```
 
 `declare name: Type`の`Type`にはクラス名を書ける。宣言したクラス名は修飾せずそのまま使え、実行時コードは生成されない。`import type ext`したあとで`local ext = require(...)`と実体を束縛しても、`.luard`が宣言した型は保たれる。

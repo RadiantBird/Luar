@@ -28,13 +28,57 @@ impl ParseError {
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// `.luard` の宣言モード。メソッドは本体(と `end`)を持たない。
+    bodyless_methods: bool,
 }
 
 impl Parser {
     pub fn new(src: &str) -> Result<Self, ParseError> {
         let mut lex = Lexer::new(src);
         let tokens = lex.tokenize().map_err(ParseError::lexer)?;
-        Ok(Parser { tokens, pos: 0 })
+        Ok(Parser {
+            tokens,
+            pos: 0,
+            bodyless_methods: false,
+        })
+    }
+
+    /// 字句解析済みの末尾が Eof のtoken列から作る。`.luard` の `declare class` が
+    /// 通常のclass構文を再利用するために使う。
+    pub fn from_tokens(tokens: Vec<Token>) -> Self {
+        Parser {
+            tokens,
+            pos: 0,
+            bodyless_methods: false,
+        }
+    }
+
+    /// メソッドを本体なし(シグネチャだけ)として読む。宣言ファイル用。
+    pub fn with_bodyless_methods(mut self) -> Self {
+        self.bodyless_methods = true;
+        self
+    }
+
+    /// 次のtokenが Eof か。
+    pub fn at_end(&self) -> bool {
+        self.is_at_end()
+    }
+
+    pub fn next_kind(&self) -> &TokenKind {
+        self.peek_kind()
+    }
+
+    /// 現在位置の `class ... end` を1つ読む。
+    pub fn parse_class(&mut self) -> Result<ClassDecl, ParseError> {
+        match self.parse_class_decl()? {
+            Stmt::ClassDecl(decl) => Ok(decl),
+            _ => unreachable!("parse_class_decl always returns a class"),
+        }
+    }
+
+    /// これまでに消費したtoken数。
+    pub fn position(&self) -> usize {
+        self.pos
     }
 
     fn peek(&self) -> &Token {
@@ -553,11 +597,20 @@ impl Parser {
 
         let mut top_level_members = Vec::new();
         let mut blocks = Vec::new();
+        let mut friends = Vec::new();
 
         while !self.is_at_end() && !matches!(self.peek_kind(), TokenKind::End) {
             match self.peek_kind().clone() {
                 TokenKind::Public | TokenKind::Private => {
                     blocks.push(self.parse_member_block()?);
+                }
+                // `friend` は文脈キーワード。`friend class X` のときだけ宣言として読む。
+                _ if self.is_contextual("friend")
+                    && matches!(self.peek_n_kind(1), TokenKind::Class) =>
+                {
+                    self.advance();
+                    self.advance();
+                    friends.push(self.eat_ident()?);
                 }
                 _ => {
                     top_level_members.push(self.parse_member()?);
@@ -572,6 +625,7 @@ impl Parser {
             parent,
             top_level_members,
             blocks,
+            friends,
             line,
         }))
     }
@@ -651,7 +705,7 @@ impl Parser {
         };
         let (is_abstract, is_override, is_final) = self.parse_trailing_modifiers();
 
-        let body = if is_abstract {
+        let body = if is_abstract || self.bodyless_methods {
             None
         } else {
             let b = self.parse_block(&[TokenKind::End])?;
@@ -708,7 +762,7 @@ impl Parser {
             None
         };
         let (is_abstract, is_override, is_final) = self.parse_trailing_modifiers();
-        let body = if is_abstract {
+        let body = if is_abstract || self.bodyless_methods {
             None
         } else {
             let b = self.parse_block(&[TokenKind::End])?;

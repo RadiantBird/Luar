@@ -835,6 +835,10 @@ impl Codegen {
                 });
             }
             self.line("end");
+            // friend クラスは別のスコープから呼ぶので、クラステーブルにも載せる。
+            if !decl.friends.is_empty() {
+                self.line(&format!("{name}.{} = {}", m.name, m.name));
+            }
         }
 
         // constructor

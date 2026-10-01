@@ -1,0 +1,17 @@
+declare class Part is
+    friend class Instance
+    public is
+        Anchored = false
+        CanCollide = true
+    end
+
+    private is
+        static function new(): Part
+    end
+end
+
+declare class Instance is
+    public is
+        static function new(name: string): Part?
+    end
+end

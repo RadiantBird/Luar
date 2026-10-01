@@ -1,10 +1,14 @@
 [CmdletBinding()]
 param(
-    # コンパイラ(luar.exe)も同時に更新する
+    # Also rebuild and install the compiler (luar.exe).
     [switch]$WithCompiler
 )
 
+# NOTE: keep this file ASCII-only. Windows PowerShell 5.1 reads BOM-less UTF-8 as the
+# ANSI code page, and multibyte characters in comments can swallow the next line.
+
 $ErrorActionPreference = "Stop"
+$extensionId = "luar.luar-language"
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $extensionRoot = Join-Path $repositoryRoot "luar-vscode"
@@ -22,10 +26,12 @@ if (-not (Get-Command code -ErrorAction SilentlyContinue)) {
 
 Push-Location $extensionRoot
 try {
-    # 古いVSIXが残っていると別のファイルを入れてしまうので、先に消す。
+    # A leftover .vsix could be installed by mistake, so remove old ones first.
     Get-ChildItem -Path $extensionRoot -Filter "*.vsix" | Remove-Item -Force
 
-    & npm run package
+    # vsce asks for confirmation when repository/LICENSE/.vscodeignore are missing; answer "y".
+    # (PowerShell swallows the first "--", so "npm run package -- args" does not work; call vsce directly.)
+    "y", "y", "y" | & npx --yes @vscode/vsce package --no-dependencies --allow-missing-repository --skip-license
     if ($LASTEXITCODE -ne 0) {
         throw "VSIX packaging failed with exit code $LASTEXITCODE"
     }
@@ -35,7 +41,12 @@ try {
         throw "Packaging finished but no .vsix was produced in $extensionRoot"
     }
 
-    # パスに空白があっても分割されないよう、引数として1つで渡す。
+    # Installing over the same version with --force does not always replace the files,
+    # so uninstall first (a failure here, e.g. not installed yet, is fine).
+    & code --uninstall-extension $extensionId
+    Start-Sleep -Seconds 1
+
+    # Pass the path as a single argument so spaces in it do not split it.
     & code --install-extension $vsix.FullName --force
     if ($LASTEXITCODE -ne 0) {
         throw "Extension install failed with exit code $LASTEXITCODE"
@@ -45,4 +56,15 @@ finally {
     Pop-Location
 }
 
-Write-Host "Installed $($vsix.Name). Reload VS Code (Ctrl+Shift+P > Developer: Reload Window) to apply it."
+# Verify the installed files are the freshly built ones.
+$installedServer = Join-Path $env:USERPROFILE ".vscode\extensions\$extensionId-*\out\server.js"
+$installedFile = Get-ChildItem -Path $installedServer -ErrorAction SilentlyContinue | Select-Object -First 1
+$builtFile = Get-Item (Join-Path $extensionRoot "out\server.js")
+if (-not $installedFile) {
+    Write-Warning "Could not find the installed extension under $env:USERPROFILE\.vscode\extensions."
+}
+elseif ($installedFile.Length -ne $builtFile.Length) {
+    Write-Warning "Installed server.js ($($installedFile.FullName)) differs from the built one. Close ALL VS Code windows and run this script again."
+}
+
+Write-Host "Installed $($vsix.Name). Fully restart VS Code (close every window) to apply it."

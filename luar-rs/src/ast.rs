@@ -195,6 +195,8 @@ pub struct ClassDecl {
     pub parent: Option<String>,
     pub top_level_members: Vec<Member>,
     pub blocks: Vec<MemberBlock>,
+    /// friend class X で、privateメンバーへのアクセスを許可したクラス名。
+    pub friends: Vec<String>,
     pub line: usize,
 }
 

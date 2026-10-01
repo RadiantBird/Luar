@@ -570,3 +570,120 @@ end
     assert!(output.contains("local function new()"));
     assert!(!output.contains("function Single.new"));
 }
+
+const FRIEND_CLASSES: &str = r#"
+class Vault is
+    friend class Teller
+    private is
+        balance = 10
+        function audit()
+            return 1
+        end
+        static function open()
+            return 1
+        end
+    end
+end
+"#;
+
+#[test]
+fn friend_class_can_use_private_members_of_the_befriended_class() {
+    let source = format!(
+        "{FRIEND_CLASSES}
+class Teller is
+    public is
+        function peek(vault: Vault)
+            local v = Vault.new()
+            print(v.balance)
+            v.audit()
+            Vault.open()
+        end
+    end
+end
+"
+    );
+    let output = compile(&source).expect("a friend may access private members");
+    assert!(output.contains("Vault.audit = audit"), "{output}");
+    assert!(output.contains("Vault.open = open"), "{output}");
+}
+
+#[test]
+fn non_friend_class_cannot_use_private_members() {
+    let source = format!(
+        "{FRIEND_CLASSES}
+class Thief is
+    public is
+        function steal()
+            local v = Vault.new()
+            print(v.balance)
+            v.audit()
+        end
+    end
+end
+"
+    );
+    assert_error(&source, "cannot access private field 'balance' of class 'Vault'");
+    assert_error(&source, "cannot access private method 'audit' of class 'Vault'");
+}
+
+#[test]
+fn friendship_is_one_way_and_not_inherited() {
+    let source = "
+class Vault is
+    friend class Teller
+    private is
+        balance = 10
+    end
+end
+class Teller is
+    private is
+        secret = 1
+    end
+    public is
+        function look()
+            local v = Vault.new()
+            print(v.balance)
+        end
+    end
+end
+class Vault2 is
+    public is
+        function look()
+            local t = Teller.new()
+            print(t.secret)
+        end
+    end
+end
+class SubTeller is Teller
+    public is
+        function look()
+            local v = Vault.new()
+            print(v.balance)
+        end
+    end
+end
+";
+    let errors = check(source);
+    assert!(
+        errors.iter().any(|error| error.contains("private field 'secret'")),
+        "{errors:#?}"
+    );
+    assert_eq!(
+        errors
+            .iter()
+            .filter(|error| error.contains("private field 'balance'"))
+            .count(),
+        1,
+        "only the subclass of the friend is rejected: {errors:#?}"
+    );
+}
+
+#[test]
+fn unknown_friend_class_is_rejected_and_friend_stays_a_plain_identifier_elsewhere() {
+    assert_error(
+        "class A is\n    friend class Missing\nend\n",
+        "unknown friend class 'Missing'",
+    );
+    compile("local friend = 1\nprint(friend)\nclass B is\n    friend = 2\nend\n")
+        .expect("`friend` is only a keyword before `class` in a class body");
+}

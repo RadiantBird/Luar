@@ -1,0 +1,10 @@
+import type Part
+
+function main()
+    if part := Instance.new("Part") then
+        print(part.Anchored)
+        part.Anchored = true
+        print(part.Anchored)
+    end
+end
+main()

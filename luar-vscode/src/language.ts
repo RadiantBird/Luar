@@ -99,8 +99,9 @@ export function parseModuleDefinition(moduleName: string, source: string, filePa
       // `declare class Name ... end`: 補完はコンパイラ側で行うので、エディタ側は
       // 構文エラーにならないよう、対応する `end` まで読み飛ばす。
       const open = tokens[pos]!;
-      let closing = pos + 1;
-      while (tokens[closing] && tokens[closing]!.kind !== "end" && tokens[closing]!.kind !== "EOF") closing++;
+      // `declare class Name is` は本体・public/private・friendを持つ通常のclass構文で、
+      // ブロックが入れ子になる。`is` のない短い形式は最初の `end` で閉じる。
+      const closing = tokens[pos + 2]?.kind === "is" ? findDeclaredClassEnd(tokens, pos) : findFirstEnd(tokens, pos + 1);
       if (!tokens[closing] || tokens[closing]!.kind === "EOF") {
         errors.push(moduleError(filePath, open.line, open.col, "expected 'end' to close 'declare class'"));
         break;
@@ -285,6 +286,52 @@ function addModuleDefinitions(index: DocumentIndex, definitions: ModuleDefinitio
       ));
     }
   }
+}
+
+function findFirstEnd(tokens: Token[], from: number): number {
+  let index = from;
+  while (tokens[index] && tokens[index]!.kind !== "end" && tokens[index]!.kind !== "EOF") index++;
+  return index;
+}
+
+/**
+ * `declare class X is` の閉じ `end`。メソッドが本体なしの書き方を先に試し、直後が次の
+ * `declare` かEOFでなければ、本体つき(メソッドが `end` を持つ)として数え直す。
+ */
+function findDeclaredClassEnd(tokens: Token[], classPos: number): number {
+  const bodyless = findClassBodyEnd(tokens, classPos, false);
+  const next = tokens[bodyless + 1]?.kind;
+  if (tokens[bodyless]?.kind === "end" && (next === "declare" || next === "EOF")) return bodyless;
+  return findClassBodyEnd(tokens, classPos, true);
+}
+
+/** `class` tokenから、対応する `end` までを入れ子を数えて探す。見つからなければEOFの位置。 */
+function findClassBodyEnd(tokens: Token[], classPos: number, methodsHaveBodies: boolean): number {
+  let depth = 0;
+  let loopHeader = false;
+  for (let i = classPos; i < tokens.length; i++) {
+    const kind = tokens[i]!.kind;
+    if (kind === "EOF") return i;
+    if (kind === "while" || kind === "for") {
+      depth++;
+      loopHeader = true;
+    } else if (kind === "do") {
+      if (loopHeader) loopHeader = false;
+      else depth++;
+    } else if (kind === "class" && tokens[i - 1]?.kind === "Ident" && tokens[i - 1]!.value === "friend") {
+      // `friend class X` はブロックを開かない。
+    } else if (kind === "function" && !methodsHaveBodies) {
+      // 本体なしのメソッドは `end` を持たない。
+    } else if (kind === "class" || kind === "function" || kind === "if" || kind === "repeat" || kind === "public" || kind === "private") {
+      depth++;
+    } else if (kind === "until") {
+      depth--;
+    } else if (kind === "end") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return tokens.length - 1;
 }
 
 function parseDefinitionType(tokens: Token[], start: number): number {

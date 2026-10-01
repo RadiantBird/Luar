@@ -1,5 +1,6 @@
-use crate::ast::{Param, TypeExpr};
+use crate::ast::{ClassDecl, Param, TypeExpr};
 use crate::lexer::{Lexer, Token, TokenKind};
+use crate::parser::Parser;
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
@@ -20,6 +21,9 @@ pub struct DeclaredClass {
     pub parent: Option<String>,
     pub fields: Vec<(String, TypeExpr)>,
     pub methods: Vec<DeclaredMethod>,
+    /// 通常のclass構文(`declare class X is ... end`)で書かれた宣言。
+    /// アクセス修飾子とfriendを保つため、その場合はこちらを正とする。
+    pub decl: Option<ClassDecl>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -186,6 +190,36 @@ impl DefinitionParser<'_> {
     /// メンバーは `name: Type` のフィールドと、本体のない
     /// `[static] function name(params)[: Return]` で、`end` で閉じる。
     fn parse_declared_class(&mut self) -> Result<DeclaredClass, ModuleError> {
+        // `declare class Name is` は通常のclass構文(本体・public/private・friend)として読む。
+        // 本体は構文だけ検査し、コードは生成しない。`is` のない短い形式は下の宣言専用の文法。
+        let start = self.pos;
+        if self.tokens.get(start + 2).map(|token| &token.kind) == Some(&TokenKind::Is) {
+            // 本体なし(シグネチャだけ)の書き方を先に試す。クラスの直後が次の `declare` か
+            // 末尾で終われば採用し、そうでなければ本体つきの通常のclass構文として読む。
+            let tokens = self.tokens[start..].to_vec();
+            let mut bodyless = Parser::from_tokens(tokens.clone()).with_bodyless_methods();
+            let bodyless_decl = bodyless.parse_class().ok().filter(|_| {
+                matches!(bodyless.next_kind(), TokenKind::Declare | TokenKind::Eof)
+            });
+            let (decl, consumed) = match bodyless_decl {
+                Some(decl) => (decl, bodyless.position()),
+                None => {
+                    let mut parser = Parser::from_tokens(tokens);
+                    let decl = parser
+                        .parse_class()
+                        .map_err(|error| self.error(error.span.line, error.message.clone()))?;
+                    (decl, parser.position())
+                }
+            };
+            self.pos = start + consumed;
+            return Ok(DeclaredClass {
+                name: decl.name.clone(),
+                parent: decl.parent.clone(),
+                fields: Vec::new(),
+                methods: Vec::new(),
+                decl: Some(decl),
+            });
+        }
         self.expect(TokenKind::Class, "'class'")?;
         let (name, _) = self.expect_ident()?;
         let parent = if self.take(TokenKind::Is) {
@@ -253,6 +287,7 @@ impl DefinitionParser<'_> {
             parent,
             fields,
             methods,
+            decl: None,
         })
     }
 
