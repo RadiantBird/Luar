@@ -1,6 +1,7 @@
 use crate::ast::*;
 use crate::completion::{
-    CompletionItem, PROBE_MEMBERS_NAME, PROBE_SCOPE_NAME, params_text, type_expr_text,
+    CompletionItem, PROBE_MEMBERS_NAME, PROBE_SCOPE_NAME, ReceiverInfo, params_text,
+    type_expr_text,
 };
 use crate::lexer::SourceSpan;
 use crate::modules::{DeclaredClass, ModuleDefinition};
@@ -85,6 +86,8 @@ pub struct Checker {
     modules: Vec<ModuleDefinition>,
     /// 補完用の `__luar_probe` / `__luar_scope` が記録した候補。
     probe: Option<Vec<CompletionItem>>,
+    /// `__luar_probe` のレシーバの型。
+    probe_receiver: Option<ReceiverInfo>,
     /// `const` で宣言された名前。補完で種別を示すためだけに使う近似。
     const_names: HashSet<String>,
 }
@@ -96,6 +99,7 @@ impl Checker {
             classes: HashMap::new(),
             modules: Vec::new(),
             probe: None,
+            probe_receiver: None,
             const_names: HashSet::new(),
         }
     }
@@ -110,10 +114,38 @@ impl Checker {
         self.probe.take()
     }
 
+    pub fn take_receiver(&mut self) -> Option<ReceiverInfo> {
+        self.probe_receiver.take()
+    }
+
+    fn receiver_info(&self, ty: &ValueType, class_object: bool) -> ReceiverInfo {
+        let mut info = ReceiverInfo {
+            class_object,
+            is_shape: matches!(ty, ValueType::Shape(_)),
+            ..ReceiverInfo::default()
+        };
+        if let ValueType::Class(name) = ty {
+            let mut seen = HashSet::new();
+            let mut current = Some(name.clone());
+            while let Some(class_name) = current {
+                if !seen.insert(class_name.clone()) {
+                    break;
+                }
+                current = self
+                    .classes
+                    .get(&class_name)
+                    .and_then(|info| info.parent_name.clone());
+                info.class_chain.push(class_name);
+            }
+        }
+        info
+    }
+
     pub fn check(&mut self, program: &mut Program) -> Vec<CheckError> {
         self.errors.clear();
         self.classes.clear();
         self.probe = None;
+        self.probe_receiver = None;
         self.const_names.clear();
         // Pass 0: .luard の declare class を実体なしのクラスとして登録する
         let declared: Vec<DeclaredClass> = self
@@ -459,6 +491,7 @@ impl Checker {
                     if name == PROBE_MEMBERS_NAME && args.len() == 1 {
                         let receiver_type = self.infer_expr_type(&args[0], env);
                         let class_object = self.is_class_object(&args[0], env);
+                        self.probe_receiver = Some(self.receiver_info(&receiver_type, class_object));
                         self.probe = Some(self.member_items(&receiver_type, class_object));
                         return ValueType::Unknown;
                     }
@@ -488,6 +521,10 @@ impl Checker {
                     }
                     let obj_type = self.infer_expr_type(obj, env);
                     return self.method_return_type(&obj_type, name);
+                }
+                if !matches!(callee.as_ref(), Expr::Ident { .. }) {
+                    // `f(x)(y)` のように、呼び出し結果を呼ぶ式の内側も検査する。
+                    self.infer_expr_type(callee, env);
                 }
                 ValueType::Unknown
             }

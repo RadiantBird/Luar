@@ -15,6 +15,7 @@
     { "include": "#declare-decl" },
     { "include": "#binding-operator" },
     { "include": "#function-decl" },
+    { "include": "#friend-decl" },
     { "include": "#class-decl" },
     { "include": "#label" },
     { "include": "#keyword" },
@@ -124,6 +125,13 @@
           }
         }
       ]
+    },
+    "friend-decl": {
+      "comment": "contextual friend class X: friend is a keyword only before 'class'",
+      "match": "\\b(friend)\\b(?=[ \\t]+class\\b)",
+      "captures": {
+        "1": { "name": "keyword.luar" }
+      }
     },
     "class-decl": {
       "comment": "class Name ...",

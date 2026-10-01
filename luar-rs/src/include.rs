@@ -342,6 +342,55 @@ pub fn include_binding_names(source: &str) -> HashSet<String> {
         .collect()
 }
 
+/// ソース中の `local/const name = !include("path")` 1行分の位置情報。
+/// 列は0始まりのUTF-16単位 (LSPの座標系)。
+#[derive(Debug, Clone)]
+pub struct IncludeLine {
+    /// 1始まりの行番号。
+    pub line: usize,
+    pub name: String,
+    pub name_column: usize,
+    pub path: String,
+    /// パス文字列(引用符を含む)の範囲。
+    pub path_start_column: usize,
+    pub path_end_column: usize,
+}
+
+pub fn include_lines(source: &str) -> Vec<IncludeLine> {
+    let utf16 = |text: &str| text.encode_utf16().count();
+    let mut result = Vec::new();
+    for (index, line) in source.lines().enumerate() {
+        let Some(declaration) = parse_include_declaration(line) else {
+            continue;
+        };
+        let Some(include_at) = line.find("!include") else {
+            continue;
+        };
+        let Some(name_at) = line[..include_at].find(declaration.name) else {
+            continue;
+        };
+        let after = &line[include_at..];
+        let Some(quote_offset) = after.find(['"', '\'']) else {
+            continue;
+        };
+        let quote_at = include_at + quote_offset;
+        let quote = line[quote_at..].chars().next().unwrap_or('"');
+        let Some(closing) = line[quote_at + 1..].find(quote) else {
+            continue;
+        };
+        let end_at = quote_at + 1 + closing + 1;
+        result.push(IncludeLine {
+            line: index + 1,
+            name: declaration.name.to_string(),
+            name_column: utf16(&line[..name_at]),
+            path: declaration.path.clone(),
+            path_start_column: utf16(&line[..quote_at]),
+            path_end_column: utf16(&line[..end_at]),
+        });
+    }
+    result
+}
+
 struct IncludeDeclaration<'a> {
     binding: &'a str,
     name: &'a str,

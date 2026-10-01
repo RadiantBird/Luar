@@ -17,6 +17,8 @@ import {
   Range,
   SymbolKind as LspSymbolKind,
   DidChangeConfigurationParams,
+  Location,
+  SemanticTokensBuilder,
 } from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
 import * as path from "node:path";
@@ -56,7 +58,29 @@ interface CompilerDiagnostic {
   message: string;
 }
 
-const PRIMITIVE_TYPES = ["number", "string", "boolean", "nil", "table", "function", "any"] as const;
+// コンパイラ(`luar tokens`)が返す `type` / `modifiers` の名前と、この並びを一致させる。
+const SEMANTIC_TOKEN_TYPES = [
+  "namespace", "class", "function", "method", "variable", "parameter", "property", "type", "keyword",
+] as const;
+const SEMANTIC_TOKEN_MODIFIERS = ["declaration", "readonly", "static"] as const;
+
+interface CompilerSemanticToken {
+  line: number;
+  column: number;
+  length: number;
+  type: string;
+  modifiers: string[];
+}
+
+interface CompilerLocation {
+  file: string;
+  line: number;
+  column: number;
+  endLine: number;
+  endColumn: number;
+}
+
+const PRIMITIVE_TYPES =["number", "string", "boolean", "nil", "table", "function", "any"] as const;
 
 let settings: CompilerSettings = { compilerPath: "luar", target: "luau" };
 let compilerMissingWasReported = false;
@@ -69,6 +93,11 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
       completionProvider: { triggerCharacters: [".", ":"] },
       hoverProvider: true,
       documentSymbolProvider: true,
+      definitionProvider: true,
+      semanticTokensProvider: {
+        legend: { tokenTypes: [...SEMANTIC_TOKEN_TYPES], tokenModifiers: [...SEMANTIC_TOKEN_MODIFIERS] },
+        full: true,
+      },
     },
   };
 });
@@ -263,6 +292,78 @@ function errorRange(error: { line: number; col: number }, fallbackLine: number, 
   const col = error.col >= 0 ? error.col : fallbackCol;
   return Range.create(line, col, line, col + 1);
 }
+/** 文書をstdinで渡して `luar <command> ...` のJSON出力を得る。失敗・タイムアウト時は null。 */
+function queryCompiler<T>(document: TextDocument, command: string, extraArgs: string[] = []): Promise<T | null> {
+  let sourcePath: string;
+  try {
+    sourcePath = fileURLToPath(document.uri);
+  } catch {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    const child = spawn(settings.compilerPath, [
+      command, "--target", settings.target, "--stdin", "--source-path", sourcePath, ...extraArgs,
+    ], { windowsHide: true });
+    let stdout = "";
+    let settled = false;
+    const finish = (value: T | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(null);
+    }, 5000);
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+    child.on("error", () => finish(null));
+    child.stdin.on("error", () => { /* close/error handlers own the result */ });
+    child.on("close", (code) => {
+      if (code !== 0) return finish(null);
+      try {
+        finish(JSON.parse(stdout) as T);
+      } catch {
+        finish(null);
+      }
+    });
+    child.stdin.end(document.getText());
+  });
+}
+
+connection.onDefinition(async (params): Promise<Location[] | null> => {
+  const document = documents.get(params.textDocument.uri);
+  if (!document) return null;
+  const result = await queryCompiler<{ locations?: CompilerLocation[] }>(
+    document, "definition", ["--offset", String(document.offsetAt(params.position))],
+  );
+  if (!result?.locations?.length) return null;
+  const sourcePath = fileURLToPath(document.uri);
+  return result.locations.map((location) => Location.create(
+    diagnosticUri(document.uri, sourcePath, location.file),
+    Range.create(location.line, location.column, location.endLine, location.endColumn),
+  ));
+});
+
+connection.languages.semanticTokens.on(async (params) => {
+  const builder = new SemanticTokensBuilder();
+  const document = documents.get(params.textDocument.uri);
+  if (!document) return builder.build();
+  const result = await queryCompiler<{ tokens?: CompilerSemanticToken[] }>(document, "tokens");
+  for (const token of result?.tokens ?? []) {
+    const type = SEMANTIC_TOKEN_TYPES.indexOf(token.type as typeof SEMANTIC_TOKEN_TYPES[number]);
+    if (type < 0) continue;
+    let modifiers = 0;
+    for (const modifier of token.modifiers) {
+      const bit = SEMANTIC_TOKEN_MODIFIERS.indexOf(modifier as typeof SEMANTIC_TOKEN_MODIFIERS[number]);
+      if (bit >= 0) modifiers |= 1 << bit;
+    }
+    builder.push(token.line, token.column, token.length, type, modifiers);
+  }
+  return builder.build();
+});
+
 interface CompilerCompletionItem {
   label: string;
   kind: "field" | "method" | "function" | "variable" | "constant" | "class" | "module";

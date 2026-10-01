@@ -6,8 +6,10 @@ pub mod control_flow;
 pub mod include;
 pub mod lexer;
 pub mod modules;
+pub mod navigation;
 pub mod parser;
 pub mod rename;
+pub mod symbols;
 pub mod resolver;
 
 use crate::lexer::SourceSpan;
@@ -452,6 +454,26 @@ pub fn complete_source_with_options(
     utf16_offset: usize,
     options: &CompileOptions,
 ) -> Result<Vec<completion::CompletionItem>, String> {
+    let (mut checker, _) = run_probe(source, utf16_offset, options)?;
+    Ok(checker.take_completions().unwrap_or_default())
+}
+
+/// カーソル位置のメンバーアクセスのレシーバの型と、レシーバ式の元の文字列。
+pub(crate) fn probe_receiver(
+    source: &str,
+    utf16_offset: usize,
+    options: &CompileOptions,
+) -> Option<(completion::ReceiverInfo, String)> {
+    let (mut checker, probe) = run_probe(source, utf16_offset, options).ok()?;
+    Some((checker.take_receiver()?, probe.receiver?))
+}
+
+/// カーソル位置を補完用の呼び出しへ書き換えて型検査を通し、記録を持つチェッカーを返す。
+fn run_probe(
+    source: &str,
+    utf16_offset: usize,
+    options: &CompileOptions,
+) -> Result<(checker::Checker, completion::ProbeSource), String> {
     let probe = completion::build_probe(source, utf16_offset);
     let prepared = prepare_analysis(&probe.source, options).or_else(|first_error| {
         // 閉じ括弧が足りない入力途中のソースは、補った版でもう一度試す。
@@ -473,7 +495,7 @@ pub fn complete_source_with_options(
     resolver::Resolver::new(definitions.clone(), options.target).resolve(&mut program);
     let mut checker = checker::Checker::new().with_modules(definitions);
     checker.check(&mut program);
-    Ok(checker.take_completions().unwrap_or_default())
+    Ok((checker, probe))
 }
 
 pub fn dump_ir(source: &str, options: &CompileOptions) -> Result<String, Vec<Diagnostic>> {

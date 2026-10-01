@@ -39,6 +39,14 @@
         }
       }
     },
+    "configurationDefaults": {
+      "[luar]": {
+        "editor.semanticHighlighting.enabled": true
+      },
+      "[luard]": {
+        "editor.semanticHighlighting.enabled": true
+      }
+    },
     "languages": [
       {
         "id": "luar",

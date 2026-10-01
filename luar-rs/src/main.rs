@@ -1,4 +1,5 @@
 use luar_rs::completion::CompletionReport;
+use luar_rs::navigation::{self, DefinitionReport, TokenReport};
 use luar_rs::{
     CompileOptions, Diagnostic, DiagnosticReport, Target, analyze_source_with_options,
     complete_source_with_options, compile_source_with_options, dump_ir,
@@ -19,6 +20,8 @@ Usage:
   luar check [--target luau|lua54] --stdin --source-path <path> [--diagnostic-format json]
   luar dump-ir [--target luau|lua54] <input.luar>
   luar complete [--target luau|lua54] --stdin --source-path <path> --offset <utf16-offset>
+  luar tokens [--target luau|lua54] --stdin --source-path <path>
+  luar definition [--target luau|lua54] --stdin --source-path <path> --offset <utf16-offset>
   luar help
 
 The default target is luau. Output extensions do not select a target.";
@@ -29,6 +32,8 @@ enum Command {
     Check,
     DumpIr,
     Complete,
+    Tokens,
+    Definition,
 }
 
 struct Cli {
@@ -103,6 +108,15 @@ fn run() -> Result<(), ()> {
                 .map_err(|diagnostics| print_diagnostics(&diagnostics, cli.json))?;
             print!("{output}");
         }
+        Command::Tokens => {
+            let tokens = navigation::semantic_tokens(&source, &options);
+            write_json(&TokenReport { tokens })?;
+        }
+        Command::Definition => {
+            let offset = cli.offset.expect("validated offset");
+            let locations = navigation::definition(&source, offset, &options);
+            write_json(&DefinitionReport { locations })?;
+        }
         Command::Complete => {
             let offset = cli.offset.expect("validated offset");
             let items = complete_source_with_options(&source, offset, &options).map_err(|message| {
@@ -123,6 +137,8 @@ fn parse_cli(arguments: &[String]) -> Result<Cli, String> {
         "check" => Command::Check,
         "dump-ir" => Command::DumpIr,
         "complete" => Command::Complete,
+        "tokens" => Command::Tokens,
+        "definition" => Command::Definition,
         command => return Err(format!("unknown command '{command}'")),
     };
     let mut target = Target::Luau;
@@ -176,16 +192,23 @@ fn parse_cli(arguments: &[String]) -> Result<Cli, String> {
         index += 1;
     }
 
-    if command == Command::Complete {
-        if !stdin || offset.is_none() {
-            return Err("'complete' requires --stdin, --source-path and --offset".to_string());
+    let needs_offset = matches!(command, Command::Complete | Command::Definition);
+    if needs_offset || command == Command::Tokens {
+        if !stdin || (needs_offset && offset.is_none()) {
+            let needed = if needs_offset {
+                "--stdin, --source-path and --offset"
+            } else {
+                "--stdin and --source-path"
+            };
+            return Err(format!("this command requires {needed}"));
         }
-    } else if offset.is_some() {
-        return Err("--offset is only valid with 'complete'".to_string());
+    }
+    if offset.is_some() && !needs_offset {
+        return Err("--offset is only valid with 'complete' and 'definition'".to_string());
     }
     if stdin {
-        if !matches!(command, Command::Check | Command::Complete) {
-            return Err("--stdin is currently supported only by 'check' and 'complete'".to_string());
+        if command == Command::Compile || command == Command::DumpIr {
+            return Err("--stdin is not supported by 'compile' and 'dump-ir'".to_string());
         }
         if source_path.is_none() {
             return Err("--stdin requires --source-path for module/include resolution".to_string());
@@ -244,6 +267,14 @@ fn print_diagnostics(diagnostics: &[Diagnostic], json: bool) {
             diagnostic.file, diagnostic.line, diagnostic.column, diagnostic.message
         );
     }
+}
+
+fn write_json<T: serde::Serialize>(value: &T) -> Result<(), ()> {
+    serde_json::to_writer(io::stdout(), value).map_err(|error| {
+        eprintln!("luar: cannot write JSON: {error}");
+    })?;
+    println!();
+    Ok(())
 }
 
 fn print_json(diagnostics: &[Diagnostic]) -> Result<(), ()> {

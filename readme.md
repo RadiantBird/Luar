@@ -27,6 +27,23 @@ luar complete --stdin --source-path main.luar --offset 123 < main.luar
 
 `--offset`は文書先頭からのUTF-16コード単位のオフセットで、結果は`{"items":[{"label","kind","type","detail"}]}`のJSONである。入力途中で閉じ括弧が足りない場合も、補った版で解析する。コンパイラを呼べない・結果が空のときは、従来のこのファイル内の索引へフォールバックする。クラスのメソッド本体の中(`self.`など)の補完は未対応である。
 
+### 色分け(semantic tokens)と定義ジャンプ
+キーワードや文字列などはTextMate文法で、変数・const・引数・関数・メソッド・フィールド・クラス・モジュール(`import type`と`!include`の束縛名)・型名は、コンパイラの解析結果で色分けする(`luar tokens`)。constと宣言位置には`readonly`/`declaration`、staticメソッドには`static`の修飾が付く。`.luard`のクラス名もクラスとして色付けされる。拡張機能は`[luar]`/`[luard]`でsemantic highlightingを既定で有効にする。
+
+Ctrlクリック(F12)の定義ジャンプは`luar definition`で行う。対象は次のとおり。
+
+- 同じファイルの`local`/`const`/関数/引数/クラス/メソッド/フィールドの宣言(スコープとシャドーイングを考慮)。
+- `!include`したファイルの宣言。`clsdef.dog.name`の`dog`/`name`は、レシーバの型からインクルード先の定義へ飛ぶ。
+- `import type`した`.luard`の`declare`/`declare class`とそのメンバー。`import type`の名前は`.luard`自体を開く。
+- `!include("./x.luar")`のパス文字列と、その束縛名は`x.luar`を開く。
+
+```powershell
+luar tokens --stdin --source-path main.luar < main.luar
+luar definition --stdin --source-path main.luar --offset 123 < main.luar
+```
+
+型が決まらないメンバー参照は、同名のメンバー宣言を全て候補として返す。色分けと定義ジャンプは字句解析ができれば動くため、入力途中の構文エラーがあるファイルでも使える。
+
 拡張機能をVSIXから利用している場合、ソース変更後はビルドだけでなくVSIXの再生成と再インストールが必要になる。次のスクリプトがVSIXの生成からインストールまでを行う。`-WithCompiler`を付けると`luar.exe`の更新も同時に行う。実行後はVS Codeを再読み込みする。
 
 ```powershell

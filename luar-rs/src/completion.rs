@@ -32,9 +32,22 @@ pub enum ProbeKind {
     Scope,
 }
 
+/// `__luar_probe(receiver)` の時点で分かったレシーバの型。定義ジャンプに使う。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReceiverInfo {
+    /// クラスなら、そのクラスと祖先の名前 (子から親の順)。
+    pub class_chain: Vec<String>,
+    /// `Dog.` のようにクラスそのものか (インスタンスではない)。
+    pub class_object: bool,
+    /// 形の分かるテーブルか。
+    pub is_shape: bool,
+}
+
 pub struct ProbeSource {
     pub source: String,
     pub kind: ProbeKind,
+    /// メンバーアクセスのとき、レシーバ式の元の文字列。
+    pub receiver: Option<String>,
     /// 入力途中で閉じ括弧が足りない場合に試す、閉じ括弧を補った版。
     pub repaired: Option<String>,
 }
@@ -160,12 +173,19 @@ fn unclosed_closers(line: &str) -> String {
     stack.iter().rev().collect()
 }
 
-fn probe_source(head: &str, probe: &str, tail: &str, kind: ProbeKind) -> ProbeSource {
+fn probe_source(
+    head: &str,
+    probe: &str,
+    tail: &str,
+    kind: ProbeKind,
+    receiver: Option<String>,
+) -> ProbeSource {
     let line_start = head.rfind('\n').map_or(0, |index| index + 1);
     let closers = unclosed_closers(&head[line_start..]);
     ProbeSource {
         source: format!("{head}{probe}{tail}"),
         kind,
+        receiver,
         repaired: (!closers.is_empty()).then(|| format!("{head}{probe}{closers}{tail}")),
     }
 }
@@ -193,7 +213,7 @@ pub fn build_probe(source: &str, utf16_offset: usize) -> ProbeSource {
                 let head: String = chars[..start].iter().collect();
                 let tail: String = chars[end..].iter().collect();
                 let probe = format!("{PROBE_MEMBERS_NAME}({receiver})");
-                return probe_source(&head, &probe, &tail, ProbeKind::Members);
+                return probe_source(&head, &probe, &tail, ProbeKind::Members, Some(receiver));
             }
         }
     }
@@ -201,7 +221,7 @@ pub fn build_probe(source: &str, utf16_offset: usize) -> ProbeSource {
     let head: String = chars[..prefix_start].iter().collect();
     let tail: String = chars[end..].iter().collect();
     let probe = format!("{PROBE_SCOPE_NAME}()");
-    probe_source(&head, &probe, &tail, ProbeKind::Scope)
+    probe_source(&head, &probe, &tail, ProbeKind::Scope, None)
 }
 
 #[cfg(test)]
