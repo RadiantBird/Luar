@@ -4,7 +4,7 @@
 //! 宣言と参照を結び付ける。入力途中で構文エラーになっているソースでも、字句解析が
 //! できれば動く。型の判断が必要なメンバー参照の解決は、ここでは行わない(チェッカーの仕事)。
 
-use crate::lexer::{Token, TokenKind};
+use crate::lexer::{Lexer, Token, TokenKind};
 use crate::stdlib::{BuiltinKind, Builtins};
 use std::collections::HashMap;
 
@@ -158,7 +158,96 @@ pub fn analyze_definition(tokens: Vec<Token>) -> TokenAnalysis {
     run(tokens, false, Builtins::default())
 }
 
+/// テンプレート文字列の `{ ... }` の中身を字句解析し、元の位置を保った合成トークンを
+/// そのトークンの直後に挿入する。以降は通常のコードと同じ経路で名前が解決される。
+fn expand_template_tokens(tokens: Vec<Token>) -> Vec<Token> {
+    let mut expanded = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        let inner = if token.kind == TokenKind::TemplateString {
+            template_expression_tokens(&token)
+        } else {
+            Vec::new()
+        };
+        expanded.push(token);
+        expanded.extend(inner);
+    }
+    expanded
+}
+
+/// テンプレート文字列 `token` の埋め込み式のトークン。位置は元のソースのもの。
+fn template_expression_tokens(token: &Token) -> Vec<Token> {
+    let mut result = Vec::new();
+    // 本文は逆引用符の次の文字から始まる。
+    let (mut line, mut column) = (token.line, token.column + 1);
+    let mut escaped = false;
+    let mut depth = 0usize;
+    let mut text = String::new();
+    let mut start = (line, column);
+    for ch in token.value.chars() {
+        if ch == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += ch.len_utf16();
+        }
+        if depth == 0 {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '{' {
+                depth = 1;
+                text.clear();
+                // 式は `{` の次の文字から始まる。
+                start = (line, column);
+            }
+            continue;
+        }
+        match ch {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 {
+            result.extend(lex_embedded(&text, start));
+            continue;
+        }
+        text.push(ch);
+    }
+    result
+}
+
+/// 埋め込み式 `text`(元のソースの `start` から始まる)を字句解析し、元の位置のトークンにする。
+fn lex_embedded(text: &str, start: (usize, usize)) -> Vec<Token> {
+    let Ok(tokens) = Lexer::new(text).tokenize() else {
+        return Vec::new();
+    };
+    let place = |line: usize, column: usize| {
+        if line == 1 {
+            (start.0, start.1 + column - 1)
+        } else {
+            (start.0 + line - 1, column)
+        }
+    };
+    tokens
+        .into_iter()
+        .filter(|token| token.kind != TokenKind::Eof)
+        .map(|token| {
+            let (line, column) = place(token.line, token.column);
+            let (end_line, end_column) = place(token.end_line, token.end_column);
+            Token {
+                line,
+                column,
+                end_line,
+                end_column,
+                ..token
+            }
+        })
+        .collect()
+}
+
 fn run(tokens: Vec<Token>, bodyless_methods: bool, builtins: Builtins) -> TokenAnalysis {
+    let tokens = expand_template_tokens(tokens);
     let count = tokens.len();
     let mut analyzer = Analyzer {
         tokens,
@@ -605,7 +694,7 @@ impl Analyzer {
             };
             index += 3;
         } else {
-            self.mark_type_name(index);
+            self.mark_type_reference(index);
             index += 1;
         }
         if self.kind_at(index) == TokenKind::Lt {
@@ -642,6 +731,14 @@ impl Analyzer {
             index += 1;
         }
         index
+    }
+
+    /// 型注釈の位置の名前。クラス・別名・型引数も、プリミティブと同じ `type` で色付けする。
+    fn mark_type_reference(&mut self, index: usize) {
+        self.mark_type_name(index);
+        if self.entries[index].kind == Some(SymbolKind::Class) {
+            self.entries[index].kind = Some(SymbolKind::Type);
+        }
     }
 
     fn mark_type_name(&mut self, index: usize) {
@@ -1117,7 +1214,7 @@ mod tests {
             .map(|(name, _)| name.as_str())
             .collect();
         assert_eq!(members, vec!["Anchored", "new"]);
-        // `dog: Part` の `Part` は同じファイルのクラスへ解決される。
+        // `dog: Part` の `Part` は同じファイルのクラスへ解決され、型の位置なので `type` で色付けする。
         let part_ref = analysis
             .tokens
             .iter()
@@ -1126,7 +1223,7 @@ mod tests {
             .next()
             .unwrap()
             .1;
-        assert_eq!(part_ref.kind, Some(SymbolKind::Class));
+        assert_eq!(part_ref.kind, Some(SymbolKind::Type));
         assert!(part_ref.decl.is_some());
     }
 

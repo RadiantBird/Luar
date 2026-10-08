@@ -211,6 +211,7 @@ pub fn semantic_tokens(source: &str, options: &CompileOptions) -> Vec<SemanticTo
         let Some(mut kind) = entry.kind else { continue };
         // `import type` した `.luard` が宣言するクラス名は、クラスとして色付けする。
         if entry.unresolved
+            && kind != SymbolKind::Type
             && definitions
                 .iter()
                 .any(|file| file.analysis.class_decls.contains_key(&token.value))
