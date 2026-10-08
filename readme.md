@@ -143,6 +143,64 @@ local score, name = 0, "x"
 function first(a, b) ... end
 ```
 
+### ユニオン型(`A | B`)
+
+`A | B`で「AまたはB」の型を表す。`type`で名前を付けたり、引数・戻り値・`::`に使える。`T | nil`は`T?`と同じ。
+
+```lua
+type Arithmetic = Vector3 | number
+
+declare class Vector3 is
+    public is
+        function operator*(a: Vector3, b: Vector3 | number): Vector3
+        function operator/(a: Vector3, b: Arithmetic): Vector3
+    end
+end
+```
+
+ユニオンを代入するには、すべてのメンバーが受け側に入る必要がある(`number | string`は`number`に入らないが、`number | string | boolean`には入る)。`::`はどれか1つのメンバーと関連していれば許可する。ユニオンの値への演算子は、どのメンバーかを追跡しないため検査しない。関数型の戻り値は`|`を含んで読む(`(A) -> B | C`は戻り値が`B | C`)。
+
+`template <T>`はC++と同じく、直後の宣言1つだけに効く。演算子メソッドにも付けられるが、複数の演算子で共有したいときは、それぞれに書くか、ユニオン型で表す(上の例)。`.luard`の`declare class`は、`declare global class`とは書かない(クラス名はもともと修飾なしで使える)。
+
+### 型キャスト(`::`)
+
+`式 :: 型`で、式の型を確定させる。
+
+```lua
+local a: string = "2"
+local b = tonumber(a) :: number   -- number? を number にする
+
+local i = Instance.new("Part")    -- Instance?
+local p = i :: Part               -- 派生クラスへのダウンキャスト
+local s = 1 :: string             -- error: cannot cast number to string
+```
+
+キャストできるのは**関連する型**だけである。元と先の一方が他方へ代入できる、継承関係にある(派生へのダウンキャストを含む)、`T?`から`T`への絞り込み、型が決まらない値のいずれか。`number`と`string`のような無関係な型や、継承関係のないクラス同士はエラーになる。テーブル(`setmetatable({}, Dog)`など)はクラスとして扱える。
+
+- 二項演算子より強く、単項演算子より弱く結び付く。`a + b :: number`は`a + (b :: number)`、`(a + b) :: number`は括弧で束ねた式へのキャストである。
+- `::name::`はラベルなので、`::`の後に識別子と`::`が続く並びはキャストにならない。キャストの連鎖は括弧で書く(`(x :: any) :: number`)。
+- 型の側の`<`はジェネリクスとして読まれる。`a :: number < 3`ではなく`(a :: number) < 3`と書く。
+- 生成コードではキャストを消去し、その文の直前に`-- cast: tonumber(a) :: number`というコメントを付ける。
+
+### 型の推論と標準ライブラリ
+
+注釈がなくても、コンパイラが確定できる型は確定させる。リテラル・演算・`#`・`..`・比較・`x or default`・`new`・テーブルの形に加え、次を推論する。
+
+- 標準ライブラリの戻り値。`math.floor(x)`は`number`、`tonumber(s)`は`number?`、`("x"):upper()`は`string`。
+- 注釈のないユーザー関数の戻り値。すべての`return`を集め、`return 1`なら`number`、`return 1`と`return nil`が混在すれば`number?`、型が食い違えば不明な型になる。注釈の戻り値があればそれを優先する。ユーザー関数の引数は、`template`のない通常の関数では従来どおり検査しない。
+
+Lua 5.4とLuauの標準ライブラリ(`print`・`tostring`・`math`・`string`・`table`・`os`・`utf8`・`coroutine`、Lua 5.4の`io`、Luauの`bit32`・`task`・`typeof`など)は型つきで登録してあり、`--target`に応じて内容が変わる。標準関数は**引数の個数と型も検査する**。
+
+```lua
+math.floor("x")      -- error: argument 1 of 'floor' expects number, got string
+string.rep("x")      -- error: function 'rep' expects at least 2 argument(s), got 1
+math.max(1, 2, 3)    -- 可変長
+```
+
+`local print = ...`のように自分で宣言した名前は標準ライブラリを隠し、`.luard`で宣言した名前は標準ライブラリより優先される。`love.timer.getTime()`のような型が決まらない値は、どの標準関数にも渡せる。
+
+VS Codeでは標準ライブラリの名前を`defaultLibrary`修飾子つきで色付けする(`print`・`tonumber`は関数、`math`・`string`は名前空間、`math.floor`は関数、`math.pi`は読み取り専用の変数)。拡張機能側の更新(VSIXの再生成と再インストール)が必要である。
+
 ## 概要
 Luau言語から派生し、ついにオブジェクト指向・テーブルのディープコピーを実現。
 

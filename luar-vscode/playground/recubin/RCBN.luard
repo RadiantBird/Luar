@@ -1,3 +1,26 @@
+type Arithmetic = Vector3 | number
+
+declare class Vector3 is
+    public is
+        -- members
+        x: number
+        y: number
+        z: number
+        zero: Vector3
+
+        function length(v: Vector3): number
+        function normalize(v: Vector3): number
+        static function new(x: number, y: number, z: number): Vector3
+        function set(self, x: number, y: number, z: number): ()
+        
+        -- operator definitions
+        function operator+(a: Vector3, b:Vector3): Vector3
+        function operator-(a: Vector3, b:Vector3): Vector3
+        function operator*(a: Vector3, b:Arithmetic): Vector3
+        function operator/(a: Vector3, b:Arithmetic): Vector3
+    end
+end
+
 declare class Instance is
     public is
         Name: string
