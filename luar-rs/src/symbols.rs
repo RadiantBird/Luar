@@ -5,6 +5,7 @@
 //! できれば動く。型の判断が必要なメンバー参照の解決は、ここでは行わない(チェッカーの仕事)。
 
 use crate::lexer::{Token, TokenKind};
+use crate::stdlib::{BuiltinKind, Builtins};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -48,6 +49,8 @@ pub struct Entry {
     pub is_member: bool,
     /// どのスコープにも宣言がない名前。
     pub unresolved: bool,
+    /// 標準ライブラリの名前 (`print`、`math`、`math.floor`)。
+    pub builtin: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -127,6 +130,8 @@ struct Analyzer {
     template_params: Vec<(String, usize)>,
     /// `template` ヘッダを読んだ時点のスコープの深さ。そこへ戻ったら宣言が終わった。
     template_depth: usize,
+    /// 標準ライブラリの名前。宣言のない名前がこれに当たれば標準の名前として扱う。
+    builtins: Builtins,
 }
 
 const PRIMITIVE_TYPES: &[&str] = &[
@@ -135,20 +140,25 @@ const PRIMITIVE_TYPES: &[&str] = &[
 
 /// 通常のソース。メソッドは本体を持つ(abstractを除く)。
 pub fn analyze(tokens: Vec<Token>) -> TokenAnalysis {
-    run(tokens, false)
+    run(tokens, false, Builtins::default())
+}
+
+/// 標準ライブラリの名前を認識する通常のソース。
+pub fn analyze_with(tokens: Vec<Token>, builtins: Builtins) -> TokenAnalysis {
+    run(tokens, false, builtins)
 }
 
 /// `.luard`。メソッドが本体なしの書き方を先に試し、ブロックが釣り合わなければ
 /// 本体つきとして読み直す。
 pub fn analyze_definition(tokens: Vec<Token>) -> TokenAnalysis {
-    let bodyless = run(tokens.clone(), true);
+    let bodyless = run(tokens.clone(), true, Builtins::default());
     if bodyless.balanced {
         return bodyless;
     }
-    run(tokens, false)
+    run(tokens, false, Builtins::default())
 }
 
-fn run(tokens: Vec<Token>, bodyless_methods: bool) -> TokenAnalysis {
+fn run(tokens: Vec<Token>, bodyless_methods: bool, builtins: Builtins) -> TokenAnalysis {
     let count = tokens.len();
     let mut analyzer = Analyzer {
         tokens,
@@ -164,6 +174,7 @@ fn run(tokens: Vec<Token>, bodyless_methods: bool) -> TokenAnalysis {
         top_decls: HashMap::new(),
         template_params: Vec::new(),
         template_depth: 0,
+        builtins,
     };
     let mut index = 0;
     while index < count {
@@ -267,6 +278,19 @@ impl Analyzer {
                     kind: Some(decl.kind),
                     readonly: decl.readonly,
                     decl: Some(decl.token),
+                    ..Entry::default()
+                };
+            }
+            None if self.builtins.globals.contains_key(&name) => {
+                let kind = self.builtins.globals[&name];
+                self.entries[index] = Entry {
+                    kind: Some(match kind {
+                        BuiltinKind::Function => SymbolKind::Function,
+                        BuiltinKind::Namespace => SymbolKind::Namespace,
+                        BuiltinKind::Variable => SymbolKind::Variable,
+                    }),
+                    readonly: kind == BuiltinKind::Variable,
+                    builtin: true,
                     ..Entry::default()
                 };
             }
@@ -391,7 +415,8 @@ impl Analyzer {
                 {
                     index + 3
                 } else {
-                    index + 1
+                    // `expr :: Type` のキャスト。
+                    self.mark_type(index + 1)
                 }
             }
             TokenKind::Import => self.import_decl(index),
@@ -542,6 +567,10 @@ impl Analyzer {
         }
         if self.kind_at(index) == TokenKind::Question {
             index += 1;
+        }
+        // ユニオン `A | B`。
+        if self.kind_at(index) == TokenKind::Pipe {
+            return self.mark_type(index + 1);
         }
         index
     }
@@ -774,6 +803,13 @@ impl Analyzer {
                         }
                     }
                     TokenKind::DotDotDot | TokenKind::Comma => next += 1,
+                    // メソッドの先頭の `self`(と添えた型)。
+                    TokenKind::Self_ => {
+                        next += 1;
+                        if self.kind_at(next) == TokenKind::Colon {
+                            next = self.mark_type(next + 1);
+                        }
+                    }
                     _ => break,
                 }
             }
@@ -925,6 +961,9 @@ impl Analyzer {
                 }
             }
         }
+        if !assigned && self.mark_builtin_member(index) {
+            return;
+        }
         self.entries[index] = Entry {
             kind: Some(if followed_by_call {
                 SymbolKind::Method
@@ -934,6 +973,28 @@ impl Analyzer {
             is_member: true,
             ..Entry::default()
         };
+    }
+
+    /// `math.floor` / `math.pi` のように、標準の名前空間のメンバーなら標準の名前として色付けする。
+    fn mark_builtin_member(&mut self, index: usize) -> bool {
+        if index < 2 || !self.entries[index - 2].builtin {
+            return false;
+        }
+        let namespace = self.tokens[index - 2].value.clone();
+        let member = self.tokens[index].value.clone();
+        let Some(kind) = self.builtins.member(&namespace, &member) else {
+            return false;
+        };
+        self.entries[index] = Entry {
+            kind: Some(match kind {
+                BuiltinKind::Function => SymbolKind::Function,
+                _ => SymbolKind::Variable,
+            }),
+            readonly: kind != BuiltinKind::Function,
+            builtin: true,
+            ..Entry::default()
+        };
+        true
     }
 }
 

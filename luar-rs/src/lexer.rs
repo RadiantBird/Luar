@@ -59,6 +59,8 @@ pub enum TokenKind {
     DoubleColon,
     Semicolon,
     Arrow,
+    /// 型のユニオン `A | B`。
+    Pipe,
     // Assignment & comparison
     Eq,
     EqEq,
@@ -345,6 +347,7 @@ impl Lexer {
                     TokenKind::Colon
                 }
             }
+            '|' => TokenKind::Pipe,
             '=' => {
                 if self.peek() == '=' {
                     self.advance();

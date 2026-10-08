@@ -95,7 +95,10 @@ fn build_view(source: &str, options: &CompileOptions) -> Option<View> {
     let expanded = include::expand_source(source, Some(path), options.target)
         .ok()
         .unwrap_or_else(|| blanked_includes(source, &main_file, &includes));
-    let analysis = symbols::analyze(lex(&expanded.source)?);
+    let analysis = symbols::analyze_with(
+        lex(&expanded.source)?,
+        crate::stdlib::Builtins::for_target(options.target),
+    );
     Some(View {
         analysis,
         origins: expanded.origins,
@@ -186,6 +189,9 @@ fn kind_modifiers(entry: &symbols::Entry) -> Vec<String> {
     }
     if entry.is_static {
         modifiers.push("static".to_string());
+    }
+    if entry.builtin {
+        modifiers.push("defaultLibrary".to_string());
     }
     modifiers
 }

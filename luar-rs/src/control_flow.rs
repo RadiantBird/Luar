@@ -281,7 +281,7 @@ impl Validator {
                     self.walk_expr(arg);
                 }
             }
-            Expr::Unop { expr, .. } => self.walk_expr(expr),
+            Expr::Unop { expr, .. } | Expr::Cast { expr, .. } => self.walk_expr(expr),
             Expr::Binop { left, right, .. } => {
                 self.walk_expr(left);
                 self.walk_expr(right);

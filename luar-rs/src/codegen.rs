@@ -55,6 +55,8 @@ pub struct Codegen {
     /// own guards and propagate the state change outward.
     suppress_dispatch_guard: bool,
     reserved_names: HashSet<String>,
+    /// 文の出力中に lowering したキャスト(`内側の式 :: 型`)。文の直前にコメントとして書く。
+    pending_casts: Vec<String>,
 }
 
 struct LoweredExpr {
@@ -80,6 +82,7 @@ impl Codegen {
             dispatcher: None,
             suppress_dispatch_guard: false,
             reserved_names: HashSet::new(),
+            pending_casts: Vec::new(),
         }
     }
 
@@ -90,6 +93,7 @@ impl Codegen {
         self.registry = self.build_registry(program);
         self.reserved_names = collect_program_names(program);
         self.suppress_dispatch_guard = false;
+        self.pending_casts.clear();
 
         self.emit_function_body(&program.stmts);
         self.out.join("\n")
@@ -415,7 +419,21 @@ impl Codegen {
         values
     }
 
+    /// 文を出力し、その文の式に含まれるキャストを直前のコメントとして残す。
+    /// 入れ子の文は各自の分だけを書き、外側の分は保存して戻す。
     fn emit_stmt(&mut self, stmt: &Stmt) {
+        let outer = std::mem::take(&mut self.pending_casts);
+        let start = self.out.len();
+        self.emit_stmt_body(stmt);
+        let casts = std::mem::replace(&mut self.pending_casts, outer);
+        let indent = "    ".repeat(self.indent);
+        for (offset, cast) in casts.iter().enumerate() {
+            self.out
+                .insert(start + offset, type_comment::cast_comment(&indent, cast));
+        }
+    }
+
+    fn emit_stmt_body(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::ClassDecl(d) => {
                 for comment in type_comment::class_comments(d) {
@@ -1388,6 +1406,24 @@ impl Codegen {
                     expr: format!("{op} {}", parenthesize_if_expr(expr, &values[0])),
                 }
             }
+            // キャストは消去する。内側の式をそのまま出し、元の形はコメントに残す。
+            Expr::Cast { expr, ty, .. } => {
+                let (prelude, values) = self.lower_expr_sequence(&[expr.as_ref()]);
+                // 括弧で束ねていた式 (`(a + b) :: number`) は、括弧を保つ。
+                let rendered = if is_atomic_expr(expr) {
+                    values[0].clone()
+                } else {
+                    format!("({})", values[0])
+                };
+                let cast = format!("{rendered} :: {ty}");
+                if !self.pending_casts.contains(&cast) {
+                    self.pending_casts.push(cast);
+                }
+                LoweredExpr {
+                    prelude,
+                    expr: rendered,
+                }
+            }
             Expr::Binop {
                 op, left, right, ..
             } => {
@@ -1549,6 +1585,14 @@ fn is_simple_native_if(if_expr: &IfExpr) -> bool {
         && !contains_if_expr(&if_expr.else_branch.result)
 }
 
+/// 演算子の優先順位を気にせず、そのまま他の式の中に置ける式か。
+fn is_atomic_expr(expr: &Expr) -> bool {
+    !matches!(
+        expr,
+        Expr::Binop { .. } | Expr::Unop { .. } | Expr::If(_) | Expr::Function { .. }
+    )
+}
+
 fn parenthesize_if_expr(original: &Expr, rendered: &str) -> String {
     if matches!(original, Expr::If(_)) {
         format!("({rendered})")
@@ -1560,7 +1604,9 @@ fn parenthesize_if_expr(original: &Expr, rendered: &str) -> String {
 fn contains_if_expr(expr: &Expr) -> bool {
     match expr {
         Expr::If(_) => true,
-        Expr::Field { obj, .. } | Expr::Unop { expr: obj, .. } => contains_if_expr(obj),
+        Expr::Field { obj, .. } | Expr::Unop { expr: obj, .. } | Expr::Cast { expr: obj, .. } => {
+            contains_if_expr(obj)
+        }
         Expr::Index { obj, key } => contains_if_expr(obj) || contains_if_expr(key),
         Expr::Call { callee, args } => {
             contains_if_expr(callee) || args.iter().any(contains_if_expr)
@@ -1806,7 +1852,7 @@ fn collect_expr_names(expr: &Expr, names: &mut HashSet<String>) {
                 collect_expr_names(arg, names);
             }
         }
-        Expr::Unop { expr, .. } => collect_expr_names(expr, names),
+        Expr::Unop { expr, .. } | Expr::Cast { expr, .. } => collect_expr_names(expr, names),
         Expr::Binop { left, right, .. } => {
             collect_expr_names(left, names);
             collect_expr_names(right, names);
@@ -1902,7 +1948,9 @@ fn contains_goto_expr(expr: &Expr) -> bool {
                 || contains_goto_expr(&if_expr.else_branch.result)
         }
         Expr::Function { .. } => false,
-        Expr::Field { obj, .. } | Expr::Unop { expr: obj, .. } => contains_goto_expr(obj),
+        Expr::Field { obj, .. } | Expr::Unop { expr: obj, .. } | Expr::Cast { expr: obj, .. } => {
+            contains_goto_expr(obj)
+        }
         Expr::Index { obj, key } => contains_goto_expr(obj) || contains_goto_expr(key),
         Expr::Call { callee, args } => {
             contains_goto_expr(callee) || args.iter().any(contains_goto_expr)
@@ -1963,7 +2011,9 @@ fn contains_continue_expr(expr: &Expr) -> bool {
                 || contains_continue_expr(&if_expr.else_branch.result)
         }
         Expr::Function { .. } => false,
-        Expr::Field { obj, .. } | Expr::Unop { expr: obj, .. } => contains_continue_expr(obj),
+        Expr::Field { obj, .. } | Expr::Unop { expr: obj, .. } | Expr::Cast { expr: obj, .. } => {
+            contains_continue_expr(obj)
+        }
         Expr::Index { obj, key } => contains_continue_expr(obj) || contains_continue_expr(key),
         Expr::Call { callee, args } => {
             contains_continue_expr(callee) || args.iter().any(contains_continue_expr)

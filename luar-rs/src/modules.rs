@@ -92,105 +92,119 @@ pub fn load_definition(
     parse_definition(module_name, &definition_path, &source)
 }
 
+/// `load_definition` の、読めた分も返す版。ファイルが読めなければ定義は `None`。
+pub fn load_definition_lossy(
+    module_name: &str,
+    source_path: &Path,
+) -> (Option<ModuleDefinition>, Vec<ModuleError>) {
+    let definition_path = definition_path(module_name, source_path);
+    let source = match fs::read(&definition_path) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(source) => source,
+            Err(error) => {
+                return (
+                    None,
+                    vec![ModuleError {
+                        message: format!(
+                            "module definition '{}' is not valid UTF-8: {error}",
+                            definition_path.display()
+                        ),
+                        line: 0,
+                    }],
+                );
+            }
+        },
+        Err(error) => {
+            return (
+                None,
+                vec![ModuleError {
+                    message: format!(
+                        "cannot read module definition '{}': {error}",
+                        definition_path.display()
+                    ),
+                    line: 0,
+                }],
+            );
+        }
+    };
+    let (definition, errors) = parse_definition_lossy(module_name, &definition_path, &source);
+    (Some(definition), errors)
+}
+
+/// 最初のエラーで失敗する読み込み。
 pub fn parse_definition(
     module_name: &str,
     definition_path: &Path,
     source: &str,
 ) -> Result<ModuleDefinition, ModuleError> {
-    let mut lexer = Lexer::new(source);
-    let tokens = lexer.tokenize().map_err(|message| ModuleError {
-        message: format!("{}: {message}", definition_path.display()),
-        line: 0,
-    })?;
-    let mut parser = DefinitionParser {
-        tokens,
-        pos: 0,
-        path: definition_path,
-    };
-    let mut members = HashSet::new();
-    let mut globals = HashSet::new();
-    let mut member_types = Vec::new();
-    let mut global_types = Vec::new();
-    let mut classes = Vec::new();
-    let mut functions = Vec::new();
-    let mut types: Vec<DeclaredType> = Vec::new();
-    let mut all_names = HashSet::new();
+    let (definition, mut errors) = parse_definition_lossy(module_name, definition_path, source);
+    if errors.is_empty() {
+        Ok(definition)
+    } else {
+        Err(errors.remove(0))
+    }
+}
 
-    while !parser.at(TokenKind::Eof) {
-        let type_params = parser.parse_template_header()?;
-        if let Some(declared) = parser.parse_declared_type(&type_params)? {
-            if types.iter().any(|ty| ty.name == declared.name) {
-                return Err(parser.error(
-                    parser.previous_line(),
-                    format!("type '{}' is declared more than once", declared.name),
-                ));
+/// `.luard` を読めるだけ読む。壊れた宣言は次の `declare` まで読み飛ばして、
+/// それ以外の宣言は残す。エラーは宣言ごとに1つずつ返す。
+pub fn parse_definition_lossy(
+    module_name: &str,
+    definition_path: &Path,
+    source: &str,
+) -> (ModuleDefinition, Vec<ModuleError>) {
+    let mut builder = DefinitionBuilder::default();
+    let mut errors = Vec::new();
+    let mut lexer = Lexer::new(source);
+    match lexer.tokenize() {
+        Err(message) => errors.push(ModuleError {
+            message: format!("{}: {message}", definition_path.display()),
+            line: 0,
+        }),
+        Ok(tokens) => {
+            let mut parser = DefinitionParser {
+                tokens,
+                pos: 0,
+                path: definition_path,
+            };
+            while !parser.at(TokenKind::Eof) {
+                let item_start = parser.pos;
+                if let Err(error) = parser.parse_item(&mut builder) {
+                    errors.push(error);
+                    parser.pos = parser.pos.max(item_start + 1);
+                    parser.resynchronize(item_start + 1);
+                }
             }
-            types.push(declared);
-            continue;
-        }
-        parser.expect(TokenKind::Declare, "'declare'")?;
-        if parser.at(TokenKind::Function) || parser.at_global_function() {
-            let is_global = parser.take(TokenKind::Global);
-            let function = parser.parse_declared_function(is_global, type_params)?;
-            if !all_names.insert(function.name.clone()) {
-                return Err(parser.error(
-                    parser.previous_line(),
-                    format!("name '{}' is declared more than once", function.name),
-                ));
-            }
-            if function.is_global {
-                globals.insert(function.name.clone());
-            } else {
-                members.insert(function.name.clone());
-            }
-            functions.push(function);
-            continue;
-        }
-        if parser.at(TokenKind::Class) {
-            let mut class = parser.parse_declared_class()?;
-            class.type_params = type_params;
-            if !all_names.insert(class.name.clone()) {
-                return Err(parser.error(
-                    parser.previous_line(),
-                    format!("name '{}' is declared more than once", class.name),
-                ));
-            }
-            classes.push(class);
-            continue;
-        }
-        if !type_params.is_empty() {
-            return Err(parser.error(
-                parser.previous_line(),
-                "'template' can only be applied to a type, 'declare function' or 'declare class'"
-                    .to_string(),
-            ));
-        }
-        let is_global = parser.take(TokenKind::Global);
-        let (name, line) = parser.expect_ident()?;
-        parser.expect(TokenKind::Colon, "':'")?;
-        let ty = parser.parse_definition_type()?;
-        if !all_names.insert(name.clone()) {
-            return Err(parser.error(line, format!("name '{name}' is declared more than once")));
-        }
-        if is_global {
-            globals.insert(name.clone());
-            global_types.push((name, ty));
-        } else {
-            members.insert(name.clone());
-            member_types.push((name, ty));
         }
     }
+    (builder.finish(module_name), errors)
+}
 
-    Ok(ModuleDefinition {
-        name: module_name.to_string(),
-        members,
-        globals,
-        member_types,
-        global_types,
-        classes,
-        functions,
-        types,
-    })
+/// 読み込み中の宣言の集まり。
+#[derive(Default)]
+struct DefinitionBuilder {
+    members: HashSet<String>,
+    globals: HashSet<String>,
+    member_types: Vec<(String, TypeExpr)>,
+    global_types: Vec<(String, TypeExpr)>,
+    classes: Vec<DeclaredClass>,
+    functions: Vec<DeclaredFunction>,
+    types: Vec<DeclaredType>,
+    all_names: HashSet<String>,
+}
+
+impl DefinitionBuilder {
+    fn finish(self, module_name: &str) -> ModuleDefinition {
+        ModuleDefinition {
+            name: module_name.to_string(),
+            members: self.members,
+            globals: self.globals,
+            member_types: self.member_types,
+            global_types: self.global_types,
+            classes: self.classes,
+            functions: self.functions,
+            types: self.types,
+        }
+    }
 }
 
 struct DefinitionParser<'a> {
@@ -202,6 +216,107 @@ struct DefinitionParser<'a> {
 impl DefinitionParser<'_> {
     fn token(&self) -> &Token {
         &self.tokens[self.pos]
+    }
+
+    /// トップレベルの宣言を1つ読んで `builder` へ入れる。
+    fn parse_item(&mut self, builder: &mut DefinitionBuilder) -> Result<(), ModuleError> {
+        let type_params = self.parse_template_header()?;
+        if let Some(declared) = self.parse_declared_type(&type_params)? {
+            if builder.types.iter().any(|ty| ty.name == declared.name) {
+                return Err(self.error(
+                    self.previous_line(),
+                    format!("type '{}' is declared more than once", declared.name),
+                ));
+            }
+            builder.types.push(declared);
+            return Ok(());
+        }
+        self.expect(TokenKind::Declare, "'declare'")?;
+        if self.at(TokenKind::Function) || self.at_global_function() {
+            let is_global = self.take(TokenKind::Global);
+            let function = self.parse_declared_function(is_global, type_params)?;
+            if !builder.all_names.insert(function.name.clone()) {
+                return Err(self.error(
+                    self.previous_line(),
+                    format!("name '{}' is declared more than once", function.name),
+                ));
+            }
+            if function.is_global {
+                builder.globals.insert(function.name.clone());
+            } else {
+                builder.members.insert(function.name.clone());
+            }
+            builder.functions.push(function);
+            return Ok(());
+        }
+        if self.at(TokenKind::Class) {
+            let mut class = self.parse_declared_class()?;
+            class.type_params = type_params;
+            if !builder.all_names.insert(class.name.clone()) {
+                return Err(self.error(
+                    self.previous_line(),
+                    format!("name '{}' is declared more than once", class.name),
+                ));
+            }
+            builder.classes.push(class);
+            return Ok(());
+        }
+        if !type_params.is_empty() {
+            return Err(self.error(
+                self.previous_line(),
+                "'template' can only be applied to a type, 'declare function' or 'declare class'"
+                    .to_string(),
+            ));
+        }
+        let is_global = self.take(TokenKind::Global);
+        if is_global && self.at(TokenKind::Class) {
+            return Err(self.error(
+                self.token().line,
+                "a declared class is already global; use `declare class Name is ... end` without 'global'"
+                    .to_string(),
+            ));
+        }
+        let (name, line) = self.expect_ident()?;
+        self.expect(TokenKind::Colon, "':'")?;
+        let ty = self.parse_definition_type()?;
+        if !builder.all_names.insert(name.clone()) {
+            return Err(self.error(line, format!("name '{name}' is declared more than once")));
+        }
+        if is_global {
+            builder.globals.insert(name.clone());
+            builder.global_types.push((name, ty));
+        } else {
+            builder.members.insert(name.clone());
+            builder.member_types.push((name, ty));
+        }
+        Ok(())
+    }
+
+    /// エラーの後、次の `declare` まで読み飛ばす。`declare` は宣言の外にしか現れないので、
+    /// 壊れたクラスの残りを丸ごと飛ばせる。直前に `template <...>` があれば、`floor` 以降に限ってそこから読み直す。
+    fn resynchronize(&mut self, floor: usize) {
+        while !self.at(TokenKind::Eof) && !self.at(TokenKind::Declare) {
+            self.pos += 1;
+        }
+        if !self.at(TokenKind::Declare) || self.pos == 0 {
+            return;
+        }
+        // `template <A, B> declare ...` の `template` まで戻る。
+        let mut back = self.pos;
+        if self.tokens[back - 1].kind == TokenKind::Gt {
+            while back > 0 && self.tokens[back - 1].kind != TokenKind::Lt {
+                back -= 1;
+            }
+            let template_at = back.checked_sub(2);
+            if let Some(index) = template_at {
+                if index >= floor
+                    && self.tokens[index].kind == TokenKind::Ident
+                    && self.tokens[index].value == "template"
+                {
+                    self.pos = index;
+                }
+            }
+        }
     }
 
     fn at(&self, kind: TokenKind) -> bool {
@@ -260,16 +375,29 @@ impl DefinitionParser<'_> {
             // 末尾で終われば採用し、そうでなければ本体つきの通常のclass構文として読む。
             let tokens = self.tokens[start..].to_vec();
             let mut bodyless = Parser::from_tokens(tokens.clone()).with_bodyless_methods();
-            let bodyless_decl = bodyless.parse_class().ok().filter(|_| {
+            let bodyless_result = bodyless.parse_class();
+            // 本体つきでも読めなかったとき、より先まで進んだ側のエラーを報告する。
+            let bodyless_error = bodyless_result
+                .as_ref()
+                .err()
+                .map(|error| (error.span.line, error.message.clone(), error.definitive));
+            let bodyless_decl = bodyless_result.ok().filter(|_| {
                 matches!(bodyless.next_kind(), TokenKind::Declare | TokenKind::Eof)
             });
             let (decl, consumed) = match bodyless_decl {
                 Some(decl) => (decl, bodyless.position()),
                 None => {
                     let mut parser = Parser::from_tokens(tokens);
-                    let decl = parser
-                        .parse_class()
-                        .map_err(|error| self.error(error.span.line, error.message.clone()))?;
+                    let decl = parser.parse_class().map_err(|error| {
+                        match bodyless_error {
+                            Some((line, message, definitive))
+                                if definitive || line >= error.span.line =>
+                            {
+                                self.error(line, message)
+                            }
+                            _ => self.error(error.span.line, error.message.clone()),
+                        }
+                    })?;
                     (decl, parser.position())
                 }
             };
@@ -357,6 +485,10 @@ impl DefinitionParser<'_> {
 
     fn parse_declared_params(&mut self) -> Result<Vec<Param>, ModuleError> {
         let mut params = Vec::new();
+        // メソッドの `self` は自動で渡されるので、引数には数えない。
+        if self.take(TokenKind::Self_) && !self.take(TokenKind::Comma) {
+            return Ok(params);
+        }
         if self.at(TokenKind::RParen) {
             return Ok(params);
         }

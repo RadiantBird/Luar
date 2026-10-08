@@ -18,6 +18,9 @@ pub struct Resolver {
     imported_modules: HashSet<String>,
     standard_globals: HashSet<String>,
     scopes: Vec<HashMap<String, bool>>,
+    /// 読み込みに失敗した `.luard` がある。そのモジュールが宣言する名前は分からないので、
+    /// 不明なグローバルとは報告しない。
+    imports_incomplete: bool,
 }
 
 impl Resolver {
@@ -47,7 +50,14 @@ impl Resolver {
             imported_modules,
             standard_globals: standard_globals(target),
             scopes: vec![HashMap::new()],
+            imports_incomplete: false,
         }
+    }
+
+    /// 読み込みに失敗した `.luard` があるとき、不明なグローバルの警告を出さない。
+    pub fn with_incomplete_imports(mut self, incomplete: bool) -> Self {
+        self.imports_incomplete = incomplete;
+        self
     }
 
     pub fn resolve(mut self, program: &mut Program) -> Vec<ResolveError> {
@@ -255,6 +265,9 @@ impl Resolver {
                     return;
                 }
                 let Some(modules) = self.module_members.get(name).cloned() else {
+                    if self.imports_incomplete {
+                        return;
+                    }
                     self.warning(
                         format!(
                             "unknown global '{}'; declare it in an imported .luard file with `declare global {name}: <T>`",
@@ -300,7 +313,7 @@ impl Resolver {
                     self.visit_expr(arg);
                 }
             }
-            Expr::Unop { expr, .. } => self.visit_expr(expr),
+            Expr::Unop { expr, .. } | Expr::Cast { expr, .. } => self.visit_expr(expr),
             Expr::Binop { left, right, .. } => {
                 self.visit_expr(left);
                 self.visit_expr(right);

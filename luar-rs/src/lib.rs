@@ -5,10 +5,12 @@ pub mod completion;
 pub mod control_flow;
 pub mod include;
 pub mod lexer;
+pub mod method_calls;
 pub mod modules;
 pub mod navigation;
 pub mod parser;
 pub mod rename;
+pub mod stdlib;
 pub mod symbols;
 pub mod type_comment;
 pub mod resolver;
@@ -293,6 +295,8 @@ struct Prepared {
     program: ast::Program,
     definitions: Vec<modules::ModuleDefinition>,
     errors: Vec<Diagnostic>,
+    /// 読み込みに失敗した(または一部しか読めなかった)`.luard` がある。
+    imports_incomplete: bool,
 }
 
 fn prepare_analysis(source: &str, options: &CompileOptions) -> Result<Prepared, Vec<Diagnostic>> {
@@ -341,6 +345,7 @@ fn prepare_analysis(source: &str, options: &CompileOptions) -> Result<Prepared, 
     }
 
     let mut definitions = Vec::new();
+    let mut imports_incomplete = false;
     if !imports.is_empty() {
         let Some(source_path) = options.source_path.as_deref() else {
             errors.push(diagnostic(
@@ -373,10 +378,16 @@ fn prepare_analysis(source: &str, options: &CompileOptions) -> Result<Prepared, 
                 });
                 continue;
             }
-            match modules::load_definition(&module_name, source_path) {
-                Ok(definition) => definitions.push(definition),
-                Err(error) => errors.push(diagnostic(&file, error.line.max(1), error.message)),
-            }
+            // 読めた宣言は使い、エラーは `import type` の行に報告する(場所は文言に含まれる)。
+            let (definition, load_errors) = modules::load_definition_lossy(&module_name, source_path);
+            let import_line = import_line(source, &module_name);
+            imports_incomplete |= !load_errors.is_empty();
+            errors.extend(
+                load_errors
+                    .into_iter()
+                    .map(|error| diagnostic(&file, import_line, error.message)),
+            );
+            definitions.extend(definition);
         }
     }
 
@@ -386,7 +397,19 @@ fn prepare_analysis(source: &str, options: &CompileOptions) -> Result<Prepared, 
         program,
         definitions,
         errors,
+        imports_incomplete,
     })
+}
+
+/// `import type name` の行番号(1始まり)。見つからなければ1。
+fn import_line(source: &str, name: &str) -> usize {
+    source
+        .lines()
+        .position(|line| {
+            let mut words = line.split_whitespace();
+            words.next() == Some("import") && words.next() == Some("type") && words.next() == Some(name)
+        })
+        .map_or(1, |index| index + 1)
 }
 
 pub fn analyze_source_with_options(
@@ -399,14 +422,17 @@ pub fn analyze_source_with_options(
         mut program,
         definitions,
         mut errors,
+        imports_incomplete,
     } = prepare_analysis(source, options)?;
 
-    let resolver_errors =
-        resolver::Resolver::new(definitions.clone(), options.target).resolve(&mut program);
+    let resolver_errors = resolver::Resolver::new(definitions.clone(), options.target)
+        .with_incomplete_imports(imports_incomplete)
+        .resolve(&mut program);
     errors.extend(resolver_errors.into_iter().map(|error| {
         diagnostic_from_expanded(&expanded, &file, error.span, error.severity, error.message)
     }));
     let checker_errors = checker::Checker::new()
+        .with_builtins(stdlib::definition(options.target))
         .with_modules(definitions)
         .check(&mut program);
     errors.extend(checker_errors.into_iter().map(|error| {
@@ -486,6 +512,7 @@ fn run_probe(
     let Prepared {
         mut program,
         definitions,
+        imports_incomplete,
         ..
     } = prepared.map_err(|diagnostics| {
         diagnostics
@@ -493,8 +520,12 @@ fn run_probe(
             .map(|diagnostic| diagnostic.message.clone())
             .unwrap_or_else(|| "cannot analyze source".to_string())
     })?;
-    resolver::Resolver::new(definitions.clone(), options.target).resolve(&mut program);
-    let mut checker = checker::Checker::new().with_modules(definitions);
+    resolver::Resolver::new(definitions.clone(), options.target)
+        .with_incomplete_imports(imports_incomplete)
+        .resolve(&mut program);
+    let mut checker = checker::Checker::new()
+        .with_builtins(stdlib::definition(options.target))
+        .with_modules(definitions);
     checker.check(&mut program);
     Ok((checker, probe))
 }
@@ -694,7 +725,9 @@ fn convert_raw_lua_markers_expr(expr: &mut ast::Expr) {
                 }
             }
         }
-        ast::Expr::Field { obj, .. } | ast::Expr::Unop { expr: obj, .. } => {
+        ast::Expr::Field { obj, .. }
+        | ast::Expr::Unop { expr: obj, .. }
+        | ast::Expr::Cast { expr: obj, .. } => {
             convert_raw_lua_markers_expr(obj)
         }
         ast::Expr::Index { obj, key } => {
@@ -755,7 +788,9 @@ fn validate_luau_label_layout(program: &ast::Program, file: &str) -> Vec<Diagnos
                     }
                 }
             }
-            ast::Expr::Field { obj, .. } | ast::Expr::Unop { expr: obj, .. } => {
+            ast::Expr::Field { obj, .. }
+            | ast::Expr::Unop { expr: obj, .. }
+            | ast::Expr::Cast { expr: obj, .. } => {
                 walk_expr(obj, file, errors)
             }
             ast::Expr::Index { obj, key } => {

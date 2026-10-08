@@ -155,7 +155,7 @@ fn collect_expr(expr: &Expr, names: &mut HashSet<String>) {
             collect_expr(obj, names);
             collect_exprs(args, names);
         }
-        Expr::Unop { expr, .. } => collect_expr(expr, names),
+        Expr::Unop { expr, .. } | Expr::Cast { expr, .. } => collect_expr(expr, names),
         Expr::Binop { left, right, .. } => {
             collect_expr(left, names);
             collect_expr(right, names);

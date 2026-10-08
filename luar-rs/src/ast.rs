@@ -10,6 +10,10 @@ pub enum TypeExpr {
     Table(Vec<(String, TypeExpr)>),
     /// `{ T }`。要素の型が揃った配列。
     Array(Box<TypeExpr>),
+    /// 関数型の最後の引数 `...T`。
+    Vararg(Box<TypeExpr>),
+    /// ユニオン型 `A | B`。
+    Union(Vec<TypeExpr>),
     /// `(A, B) -> R`
     Function {
         params: Vec<TypeExpr>,
@@ -22,7 +26,21 @@ impl std::fmt::Display for TypeExpr {
         match self {
             TypeExpr::Name(name) => write!(f, "{name}"),
             TypeExpr::Generic { name, args } => write!(f, "{name}<{}>", join_types(args)),
-            TypeExpr::Optional(inner) => write!(f, "{inner}?"),
+            TypeExpr::Optional(inner) => match inner.as_ref() {
+                TypeExpr::Union(_) | TypeExpr::Function { .. } => write!(f, "({inner})?"),
+                _ => write!(f, "{inner}?"),
+            },
+            TypeExpr::Union(members) => {
+                let members = members
+                    .iter()
+                    .map(|member| match member {
+                        TypeExpr::Function { .. } => format!("({member})"),
+                        _ => member.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                write!(f, "{members}")
+            }
             TypeExpr::Tuple(types) => write!(f, "({})", join_types(types)),
             TypeExpr::Table(fields) => {
                 let fields = fields
@@ -33,6 +51,7 @@ impl std::fmt::Display for TypeExpr {
                 write!(f, "{{ {fields} }}")
             }
             TypeExpr::Array(element) => write!(f, "{{ {element} }}"),
+            TypeExpr::Vararg(element) => write!(f, "...{element}"),
             TypeExpr::Function { params, ret } => {
                 write!(f, "({}) -> {ret}", join_types(params))
             }
@@ -101,6 +120,12 @@ pub enum Expr {
     /// A block-valued conditional expression.  Each branch keeps its
     /// statements separate from the expression whose value it produces.
     If(IfExpr),
+    /// 型キャスト `expr :: Type`。`span` は `::` の位置。
+    Cast {
+        expr: Box<Expr>,
+        ty: TypeExpr,
+        span: SourceSpan,
+    },
     /// A condition-only local binding: `name := value`.
     Bind {
         name: String,

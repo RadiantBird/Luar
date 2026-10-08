@@ -5,6 +5,8 @@ use crate::lexer::{Lexer, SourceSpan, Token, TokenKind};
 pub struct ParseError {
     pub message: String,
     pub span: SourceSpan,
+    /// 宣言の構造そのものの誤りで、読み方を変えても直らないエラー。
+    pub definitive: bool,
 }
 
 impl ParseError {
@@ -15,6 +17,7 @@ impl ParseError {
             .unwrap_or(1);
         Self {
             message,
+            definitive: false,
             span: SourceSpan {
                 line,
                 column: 1,
@@ -130,6 +133,7 @@ impl Parser {
         ParseError {
             message,
             span: self.peek().span(),
+            definitive: false,
         }
     }
 
@@ -137,6 +141,7 @@ impl Parser {
         ParseError {
             message,
             span: token.span(),
+            definitive: false,
         }
     }
 
@@ -690,18 +695,20 @@ impl Parser {
     }
 
     fn parse_member(&mut self) -> Result<Member, ParseError> {
+        if self.starts_type_alias() {
+            let mut error = self.error(format!(
+                "[{}] a type declaration cannot be written inside a class; declare it before the class",
+                self.peek().line
+            ));
+            error.definitive = true;
+            return Err(error);
+        }
         let type_params = self.parse_optional_template_header()?;
         let is_static = self.match_tok(&TokenKind::Static);
 
         if matches!(self.peek_kind(), TokenKind::Function) {
             if matches!(self.peek_n_kind(1), TokenKind::Operator) {
-                if !type_params.is_empty() {
-                    return Err(self.error(format!(
-                        "[{}] 'template' cannot be applied to an operator method",
-                        self.peek().line
-                    )));
-                }
-                return self.parse_operator_method(is_static);
+                return self.parse_operator_method(is_static, type_params);
             }
             return self.parse_method_member(is_static, type_params);
         }
@@ -756,7 +763,7 @@ impl Parser {
         self.eat(&TokenKind::Function)?;
         let name = self.eat_ident()?;
         self.eat(&TokenKind::LParen)?;
-        let params = self.parse_params()?;
+        let params = self.parse_method_params(is_static)?;
         self.eat(&TokenKind::RParen)?;
         let return_type = if self.match_tok(&TokenKind::Colon) {
             Some(self.parse_type_expr()?)
@@ -788,7 +795,11 @@ impl Parser {
         }))
     }
 
-    fn parse_operator_method(&mut self, is_static: bool) -> Result<Member, ParseError> {
+    fn parse_operator_method(
+        &mut self,
+        is_static: bool,
+        type_params: Vec<String>,
+    ) -> Result<Member, ParseError> {
         self.eat(&TokenKind::Function)?;
         self.eat(&TokenKind::Operator)?;
         let op = match self.peek_kind() {
@@ -815,7 +826,7 @@ impl Parser {
         .to_string();
         self.advance();
         self.eat(&TokenKind::LParen)?;
-        let params = self.parse_params()?;
+        let params = self.parse_method_params(is_static)?;
         self.eat(&TokenKind::RParen)?;
         let return_type = if self.match_tok(&TokenKind::Colon) {
             Some(self.parse_type_expr()?)
@@ -832,7 +843,7 @@ impl Parser {
         };
         Ok(Member::Method(MethodMember {
             name: format!("operator{op}"),
-            type_params: Vec::new(),
+            type_params,
             is_operator: true,
             operator_op: op,
             is_static,
@@ -843,6 +854,28 @@ impl Parser {
             return_type,
             body,
         }))
+    }
+
+    /// メソッドの引数。先頭に `self` を書けるが、`self` は自動で渡されるので引数には数えない
+    /// (型は所属するクラス)。`static` のメソッドにはインスタンスがないので書けない。
+    fn parse_method_params(&mut self, is_static: bool) -> Result<Vec<Param>, ParseError> {
+        if matches!(self.peek_kind(), TokenKind::Self_) {
+            if is_static {
+                return Err(self.error(format!(
+                    "[{}] a static method has no 'self'",
+                    self.peek().line
+                )));
+            }
+            self.advance();
+            // `self: Vector3` のように型を添えても、型は所属するクラスで決まる。
+            if self.match_tok(&TokenKind::Colon) {
+                self.parse_type_expr()?;
+            }
+            if !self.match_tok(&TokenKind::Comma) {
+                return Ok(Vec::new());
+            }
+        }
+        self.parse_params()
     }
 
     fn parse_params(&mut self) -> Result<Vec<Param>, ParseError> {
@@ -881,11 +914,25 @@ impl Parser {
         self.parse_type_expr()
     }
 
+    /// 型式。`A | B` のユニオンを含む。
     fn parse_type_expr(&mut self) -> Result<TypeExpr, ParseError> {
+        let first = self.parse_single_type()?;
+        if !matches!(self.peek_kind(), TokenKind::Pipe) {
+            return Ok(first);
+        }
+        let mut members = vec![first];
+        while self.match_tok(&TokenKind::Pipe) {
+            members.push(self.parse_single_type()?);
+        }
+        Ok(TypeExpr::Union(members))
+    }
+
+    /// ユニオンの1項。`T?` までを含む。
+    fn parse_single_type(&mut self) -> Result<TypeExpr, ParseError> {
         let mut ty = match self.peek_kind() {
             TokenKind::LParen => {
                 self.advance();
-                let types = self.parse_type_list(&TokenKind::RParen)?;
+                let mut types = self.parse_type_list(&TokenKind::RParen)?;
                 self.eat(&TokenKind::RParen)?;
                 if self.match_tok(&TokenKind::Arrow) {
                     let ret = self.parse_type_expr()?;
@@ -894,7 +941,16 @@ impl Parser {
                         ret: Box::new(ret),
                     });
                 }
-                TypeExpr::Tuple(types)
+                if types.iter().any(|ty| matches!(ty, TypeExpr::Vararg(_))) {
+                    return Err(self.error(
+                        "a variadic type '...T' is only allowed in a function type".to_string(),
+                    ));
+                }
+                // `(A | B)?` のように、1つだけを括弧で囲んだ型はグループ化。
+                match types.len() {
+                    1 => types.remove(0),
+                    _ => TypeExpr::Tuple(types),
+                }
             }
             TokenKind::LBrace => self.parse_table_type()?,
             _ => self.parse_named_type()?,
@@ -954,9 +1010,16 @@ impl Parser {
         if self.peek_kind() == close {
             return Ok(types);
         }
-        types.push(self.parse_type_expr()?);
-        while self.match_tok(&TokenKind::Comma) {
+        loop {
+            // `(string, ...any) -> string` の可変長引数は丸括弧の中の最後だけ。
+            if *close == TokenKind::RParen && self.match_tok(&TokenKind::DotDotDot) {
+                types.push(TypeExpr::Vararg(Box::new(self.parse_type_expr()?)));
+                break;
+            }
             types.push(self.parse_type_expr()?);
+            if !self.match_tok(&TokenKind::Comma) {
+                break;
+            }
         }
         Ok(types)
     }
@@ -1215,8 +1278,29 @@ impl Parser {
                     expr: Box::new(self.parse_unop()?),
                 })
             }
-            _ => self.parse_postfix(),
+            _ => self.parse_cast_operand(),
         }
+    }
+
+    /// `expr :: Type`。`::` Ident `::` はラベルなのでキャストにしない。
+    fn parse_cast_operand(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_postfix()?;
+        while matches!(self.peek_kind(), TokenKind::DoubleColon) && !self.at_label() {
+            let span = self.advance().span();
+            let ty = self.parse_type_expr()?;
+            expr = Expr::Cast {
+                expr: Box::new(expr),
+                ty,
+                span,
+            };
+        }
+        Ok(expr)
+    }
+
+    /// 現在位置が `::name::` というラベルか。
+    fn at_label(&self) -> bool {
+        matches!(self.peek_n_kind(1), TokenKind::Ident)
+            && matches!(self.peek_n_kind(2), TokenKind::DoubleColon)
     }
 
     fn parse_postfix(&mut self) -> Result<Expr, ParseError> {

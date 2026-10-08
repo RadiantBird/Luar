@@ -4,7 +4,7 @@ use crate::completion::{
     type_expr_text,
 };
 use crate::lexer::SourceSpan;
-use crate::modules::{DeclaredClass, ModuleDefinition};
+use crate::modules::{DeclaredClass, DeclaredFunction, ModuleDefinition};
 use std::collections::{HashMap, HashSet};
 
 mod annotation;
@@ -77,6 +77,9 @@ enum ValueType {
     /// クラスと、そのクラスの型引数 (`Box<number>`)。型引数が分からなければ空。
     Class(String, Vec<ValueType>),
     Optional(Box<ValueType>),
+    /// ユニオン型 `A | B`。2つ以上のメンバーを持ち、`nil` は含まない
+    /// (`nil` を含むものは `Optional` にする)。`ValueType::union_of` で作る。
+    Union(Vec<ValueType>),
 }
 
 /// 関数の署名。`type_params` はこの関数自身の型引数。
@@ -84,8 +87,12 @@ enum ValueType {
 struct FnSig {
     type_params: Vec<String>,
     params: Vec<ValueType>,
-    vararg: bool,
+    /// 可変長引数 `...T` の要素型。
+    vararg: Option<ValueType>,
     ret: ValueType,
+    /// 呼び出しの引数を検査するか。`template` / `declare` / 標準関数は true。
+    /// 戻り値だけを推論した通常の関数は false で、従来どおり引数を検査しない。
+    check_args: bool,
 }
 
 impl ValueType {
@@ -98,6 +105,46 @@ impl ValueType {
         matches!(self, Self::Unknown | Self::Generic(_))
     }
 
+    /// 演算子の検査で拒否しない値。ユニオンは、どのメンバーかを追跡しないので許す。
+    fn is_lenient_operand(&self) -> bool {
+        self.is_opaque() || matches!(self, Self::Union(_))
+    }
+
+    /// ユニオンの正規形を作る。入れ子を平らにし、重複を除き、`nil` を含むなら `Optional` にする。
+    /// メンバーに Unknown があれば全体が Unknown。
+    fn union_of(members: Vec<ValueType>) -> ValueType {
+        let mut flat: Vec<ValueType> = Vec::new();
+        let mut has_nil = false;
+        let mut pending = members;
+        pending.reverse();
+        while let Some(member) = pending.pop() {
+            match member {
+                Self::Unknown => return Self::Unknown,
+                Self::Nil => has_nil = true,
+                Self::Optional(inner) => {
+                    has_nil = true;
+                    pending.push(*inner);
+                }
+                Self::Union(inner) => pending.extend(inner.into_iter().rev()),
+                other => {
+                    if !flat.contains(&other) {
+                        flat.push(other);
+                    }
+                }
+            }
+        }
+        let base = match flat.len() {
+            0 => return Self::Nil,
+            1 => flat.remove(0),
+            _ => Self::Union(flat),
+        };
+        if has_nil {
+            Self::Optional(Box::new(base))
+        } else {
+            base
+        }
+    }
+
     fn display(&self) -> String {
         match self {
             Self::Unknown => "unknown".to_string(),
@@ -107,15 +154,13 @@ impl ValueType {
             Self::String => "string".to_string(),
             Self::Table | Self::Shape(_) => "table".to_string(),
             Self::Function => "function".to_string(),
-            Self::FunctionSig(sig) => format!(
-                "({}) -> {}",
-                sig.params
-                    .iter()
-                    .map(Self::display)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                sig.ret.display()
-            ),
+            Self::FunctionSig(sig) => {
+                let mut params: Vec<String> = sig.params.iter().map(Self::display).collect();
+                if let Some(vararg) = &sig.vararg {
+                    params.push(format!("...{}", vararg.display()));
+                }
+                format!("({}) -> {}", params.join(", "), sig.ret.display())
+            }
             Self::Generic(name) => name.clone(),
             Self::Record { name, .. } => name.clone(),
             Self::Class(name, args) if args.is_empty() => name.clone(),
@@ -123,7 +168,15 @@ impl ValueType {
                 "{name}<{}>",
                 args.iter().map(Self::display).collect::<Vec<_>>().join(", ")
             ),
+            Self::Optional(inner) if matches!(**inner, Self::Union(_)) => {
+                format!("({})?", inner.display())
+            }
             Self::Optional(inner) => format!("{}?", inner.display()),
+            Self::Union(members) => members
+                .iter()
+                .map(Self::display)
+                .collect::<Vec<_>>()
+                .join(" | "),
         }
     }
 }
@@ -143,6 +196,15 @@ pub struct Checker {
     aliases: HashMap<String, AliasInfo>,
     /// 検査中の `template` 関数の型引数。注釈の解決で `T` を型引数として扱う。
     scope_params: Vec<String>,
+    /// 標準ライブラリの宣言。最初の型環境に入る。
+    builtins: Option<ModuleDefinition>,
+    /// 検査中の関数ごとに、`return` した値の型を集める。戻り値の推論に使う。
+    return_types: Vec<Vec<ValueType>>,
+    /// インスタンスメソッドの呼び出し `obj.method(...)` のノードのアドレス。
+    /// 検査の後で `obj:method(...)` に書き換える(`method_calls`)。
+    instance_calls: HashSet<usize>,
+    /// 書き換え対象の呼び出しを記録中か(本体の型検査のときだけ)。
+    recording_calls: bool,
 }
 
 impl Checker {
@@ -156,7 +218,17 @@ impl Checker {
             const_names: HashSet::new(),
             aliases: HashMap::new(),
             scope_params: Vec::new(),
+            builtins: None,
+            return_types: Vec::new(),
+            instance_calls: HashSet::new(),
+            recording_calls: false,
         }
+    }
+
+    /// 標準ライブラリ(`stdlib::definition`)を型環境の初期値にする。
+    pub fn with_builtins(mut self, builtins: &ModuleDefinition) -> Self {
+        self.builtins = Some(builtins.clone());
+        self
     }
 
     pub fn with_modules(mut self, modules: Vec<ModuleDefinition>) -> Self {
@@ -176,7 +248,7 @@ impl Checker {
     fn receiver_info(&self, ty: &ValueType, class_object: bool) -> ReceiverInfo {
         let mut info = ReceiverInfo {
             class_object,
-            is_shape: matches!(ty, ValueType::Shape(_)),
+            is_shape: matches!(ty, ValueType::Shape(_) | ValueType::Record { .. }),
             ..ReceiverInfo::default()
         };
         if let ValueType::Class(name, _) = ty {
@@ -245,8 +317,19 @@ impl Checker {
 
         // Pass 4: 型注釈と明白な演算だけを検査する。Lua の外部値を
         // Unknown として残すため、ランタイム依存のコードは妨げない。
+        self.instance_calls.clear();
+        self.recording_calls = true;
         self.check_value_types(program);
+        self.recording_calls = false;
+        // `self` を取るメソッドの呼び出しは、`.` ではなく `:` で呼ぶ。
+        if !self.instance_calls.is_empty() {
+            crate::method_calls::rewrite(&mut program.stmts, &self.instance_calls);
+        }
 
+        // 関数の本体を歩く経路が複数あるため、同じ指摘が重ならないようにする。
+        let mut seen = HashSet::new();
+        self.errors
+            .retain(|error| seen.insert((error.message.clone(), error.line)));
         std::mem::take(&mut self.errors)
     }
 
@@ -282,6 +365,14 @@ impl Checker {
     /// import type されたmoduleの宣言から、モジュール名と global の初期の型環境を作る。
     fn module_env(&self) -> HashMap<String, ValueType> {
         let mut env = HashMap::new();
+        if let Some(builtins) = &self.builtins {
+            for (name, ty) in &builtins.global_types {
+                env.insert(name.clone(), self.type_from_annotation(ty));
+            }
+            for function in &builtins.functions {
+                env.insert(function.name.clone(), self.declared_function_type(function, None));
+            }
+        }
         for module in &self.modules {
             let mut fields: Vec<(String, ValueType)> = module
                 .member_types
@@ -289,13 +380,7 @@ impl Checker {
                 .map(|(name, ty)| (name.clone(), self.type_from_annotation(ty)))
                 .collect();
             for function in &module.functions {
-                let sig = self.build_sig(
-                    &function.type_params,
-                    &function.params,
-                    function.return_type.as_ref(),
-                    Some(&module.name),
-                );
-                let ty = ValueType::FunctionSig(Box::new(sig));
+                let ty = self.declared_function_type(function, Some(&module.name));
                 if function.is_global {
                     env.insert(function.name.clone(), ty);
                 } else {
@@ -313,6 +398,13 @@ impl Checker {
     fn is_assignable(expected: &ValueType, actual: &ValueType) -> bool {
         match (expected, actual) {
             (_, ValueType::Unknown) | (ValueType::Unknown, _) => true,
+            // ユニオンを代入するには、どのメンバーも受け側に入らなければならない。
+            (_, ValueType::Union(actuals)) => {
+                actuals.iter().all(|actual| Self::is_assignable(expected, actual))
+            }
+            (ValueType::Union(members), actual) => {
+                members.iter().any(|member| Self::is_assignable(member, actual))
+            }
             (ValueType::Table | ValueType::Shape(_), ValueType::Table | ValueType::Shape(_)) => true,
             (ValueType::Optional(_), ValueType::Nil) => true,
             (ValueType::Optional(expected), ValueType::Optional(actual)) => {
@@ -320,6 +412,8 @@ impl Checker {
             }
             (ValueType::Optional(inner), actual) => Self::is_assignable(inner, actual),
             (ValueType::Generic(expected), ValueType::Generic(actual)) => expected == actual,
+            // クラスのインスタンスはテーブル。
+            (ValueType::Table, ValueType::Class(..)) => true,
             (
                 ValueType::Record {
                     fields: expected, ..
@@ -472,7 +566,8 @@ impl Checker {
                 self.validate_function_decl(name, type_params, params, return_type.as_ref(), *line);
                 let saved_scope = self.scope_params.len();
                 self.scope_params.extend(type_params.iter().cloned());
-                let function_type = if type_params.is_empty() {
+                // 本体を歩く前に、再帰呼び出しから見える型を入れる(戻り値はまだ分からない)。
+                let signature = if type_params.is_empty() {
                     ValueType::Function
                 } else {
                     ValueType::FunctionSig(Box::new(self.build_sig(
@@ -482,30 +577,16 @@ impl Checker {
                         None,
                     )))
                 };
-                match name.split_once('.') {
-                    Some((owner, member)) if !member.contains('.') => {
-                        if let Some(ValueType::Shape(fields)) = env.get_mut(owner) {
-                            Self::set_shape_field(fields, member, function_type);
-                        }
-                    }
-                    Some(_) => {}
-                    None => {
-                        env.insert(name.clone(), function_type);
-                    }
-                }
-                let mut child = env.clone();
-                for param in params {
-                    if let Param::Named { name, ty } = param {
-                        child.insert(
-                            name.clone(),
-                            ty.as_ref()
-                                .map(|ty| self.type_from_annotation(ty))
-                                .unwrap_or(ValueType::Unknown),
-                        );
-                    }
-                }
+                Self::store_function(env, name, signature);
+                let mut child = self.bind_params(env, params);
+                self.return_types.push(Vec::new());
                 for child_stmt in body {
                     self.check_stmt_types(child_stmt, &mut child);
+                }
+                let returns = self.return_types.pop().unwrap_or_default();
+                if type_params.is_empty() {
+                    let inferred = self.inferred_function(params, return_type.as_ref(), returns);
+                    Self::store_function(env, name, inferred);
                 }
                 self.scope_params.truncate(saved_scope);
             }
@@ -581,8 +662,18 @@ impl Checker {
                 }
             }
             Stmt::Return(values) => {
-                for value in values {
-                    self.infer_expr_type(value, env);
+                let types: Vec<ValueType> = values
+                    .iter()
+                    .map(|value| self.infer_expr_type(value, env))
+                    .collect();
+                // 複数の値を返すときは、型を決めつけない。
+                let returned = match types.as_slice() {
+                    [] => ValueType::Nil,
+                    [single] => single.clone(),
+                    _ => ValueType::Unknown,
+                };
+                if let Some(returns) = self.return_types.last_mut() {
+                    returns.push(returned);
                 }
             }
             Stmt::ExprStmt(expr) => {
@@ -603,18 +694,20 @@ impl Checker {
                 type_params,
                 params,
                 return_type,
-                ..
-            } => {
-                if type_params.is_empty() {
-                    ValueType::Function
-                } else {
-                    ValueType::FunctionSig(Box::new(self.build_sig(
-                        type_params,
-                        params,
-                        return_type.as_ref(),
-                        None,
-                    )))
+                body,
+            } => self.infer_function_expr(type_params, params, return_type.as_ref(), body, env),
+            Expr::Cast { expr, ty, span } => {
+                let actual = self.infer_expr_type(expr, env);
+                let scope = self.scope_params.clone();
+                self.validate_type_with(ty, &scope, None, false, span.line, "in cast: ");
+                let target = self.type_from_annotation(ty);
+                if !self.cast_allowed(&actual, &target) {
+                    self.err_at(
+                        format!("cannot cast {} to {}", actual.display(), target.display()),
+                        *span,
+                    );
                 }
+                target
             }
             Expr::Ident { name, .. } => env.get(name).cloned().unwrap_or_else(|| {
                 if self.classes.contains_key(name) {
@@ -658,6 +751,12 @@ impl Checker {
                         }
                     }
                     let obj_type = self.infer_expr_type(obj, env);
+                    if self.recording_calls
+                        && !self.is_class_object(obj, env)
+                        && self.is_instance_method(&obj_type, name)
+                    {
+                        self.instance_calls.insert(expr as *const Expr as usize);
+                    }
                     if let ValueType::FunctionSig(sig) = self.member_type(&obj_type, name) {
                         return self.check_call(&sig, name, callee, args, &arg_types);
                     }
@@ -677,8 +776,19 @@ impl Checker {
             }
             Expr::MethodCall { obj, method, args } => {
                 let obj_type = self.infer_expr_type(obj, env);
-                for arg in args {
-                    self.infer_expr_type(arg, env);
+                let arg_types: Vec<ValueType> = args
+                    .iter()
+                    .map(|arg| self.infer_expr_type(arg, env))
+                    .collect();
+                // `s:upper()` は `string.upper(s)`。レシーバの分だけ最初の引数を省く。
+                if obj_type == ValueType::String {
+                    if let Some(ValueType::FunctionSig(sig)) = self.builtin_member("string", method) {
+                        let mut method_sig = (*sig).clone();
+                        if !method_sig.params.is_empty() {
+                            method_sig.params.remove(0);
+                        }
+                        return self.check_call(&method_sig, method, obj, args, &arg_types);
+                    }
                 }
                 self.method_return_type(&obj_type, method)
             }
@@ -693,7 +803,7 @@ impl Checker {
             }
             Expr::Unop { op, expr } => {
                 let actual = self.infer_expr_type(expr, env);
-                if op == "-" && actual != ValueType::Unknown && actual != ValueType::Number {
+                if op == "-" && !actual.is_lenient_operand() && actual != ValueType::Number {
                     self.err(
                         format!("unary '-' expects number, got {}", actual.display()),
                         1,
@@ -701,7 +811,7 @@ impl Checker {
                 }
                 if op == "not" {
                     ValueType::Boolean
-                } else if op == "-" {
+                } else if op == "-" || op == "#" {
                     ValueType::Number
                 } else {
                     ValueType::Unknown
@@ -720,6 +830,8 @@ impl Checker {
                     "+" | "-" | "*" | "/" | "//" | "%" | "^" => ValueType::Number,
                     ".." => ValueType::String,
                     "<" | ">" | "<=" | ">=" | "==" | "~=" => ValueType::Boolean,
+                    // `x or default`: 左が偽でなければ左の型、そうでなければ右の型。
+                    "or" => Self::or_result_type(left_type, right_type),
                     _ => ValueType::Unknown,
                 }
             }
@@ -810,7 +922,7 @@ impl Checker {
 
     fn member_items(&self, ty: &ValueType, class_object: bool) -> Vec<CompletionItem> {
         match ty {
-            ValueType::Shape(fields) => fields
+            ValueType::Shape(fields) | ValueType::Record { fields, .. } => fields
                 .iter()
                 .map(|(name, field_type)| {
                     let kind = if field_type.is_function() {
@@ -1128,11 +1240,23 @@ impl Checker {
         if let ValueType::Class(class_name, _) = left {
             if let Some(info) = self.classes.get(class_name) {
                 if let Some(method) = info.methods.get(&format!("operator{op}")) {
+                    // `.luard` では `operator+(a: Vector3, b: Vector3)` のように両辺を並べて書ける。
+                    let right_param = match method.method.params.as_slice() {
+                        [_, second, ..] => Some(second),
+                        [first] => Some(first),
+                        [] => None,
+                    };
                     if let Some(Param::Named {
                         ty: Some(expected), ..
-                    }) = method.method.params.first()
+                    }) = right_param
                     {
-                        let expected = self.type_from_annotation(expected);
+                        let expected = self.class_annotation(
+                            expected,
+                            &method.class_name,
+                            class_name,
+                            &[],
+                            &method.method.type_params,
+                        );
                         if !Self::is_assignable(&expected, right) {
                             self.err_at(
                                 format!(
@@ -1152,8 +1276,8 @@ impl Checker {
         }
         let arithmetic = matches!(op, "+" | "-" | "*" | "/" | "//" | "%" | "^");
         if arithmetic
-            && !left.is_opaque()
-            && !right.is_opaque()
+            && !left.is_lenient_operand()
+            && !right.is_lenient_operand()
             && (left != &ValueType::Number || right != &ValueType::Number)
         {
             self.err_at(
@@ -1166,7 +1290,7 @@ impl Checker {
                 span,
             );
         }
-        if op == ".." && !left.is_opaque() && !right.is_opaque() {
+        if op == ".." && !left.is_lenient_operand() && !right.is_lenient_operand() {
             let valid = |ty: &ValueType| matches!(ty, ValueType::String | ValueType::Number);
             if !valid(left) || !valid(right) {
                 self.err_at(
@@ -1764,7 +1888,7 @@ impl Checker {
                 self.check_expr_access(obj, env, current_class, can_use_super, line);
                 self.check_expr_access(key, env, current_class, can_use_super, line);
             }
-            Expr::Unop { expr, .. } => {
+            Expr::Unop { expr, .. } | Expr::Cast { expr, .. } => {
                 self.check_expr_access(expr, env, current_class, can_use_super, line);
             }
             Expr::Binop { left, right, .. } => {
@@ -1849,6 +1973,15 @@ impl Checker {
                 }
             }
             Expr::SelfExpr => current_class.map(|name| ReceiverKind::Instance(name.to_string())),
+            // `i :: Part` は、`Part` のインスタンスとして扱う。
+            Expr::Cast { ty, .. } => match ty {
+                TypeExpr::Name(name) | TypeExpr::Generic { name, .. }
+                    if self.classes.contains_key(name) =>
+                {
+                    Some(ReceiverKind::Instance(name.clone()))
+                }
+                _ => None,
+            },
             Expr::Call { callee, .. } => {
                 if let Expr::Field { obj, name } = callee.as_ref() {
                     if name == "new" {
@@ -2026,6 +2159,165 @@ impl Checker {
                 line,
             );
         }
+    }
+
+    /// 関数の定義を、名前(`a.b` を含む)に応じて型環境へ入れる。
+    fn store_function(env: &mut HashMap<String, ValueType>, name: &str, ty: ValueType) {
+        match name.split_once('.') {
+            Some((owner, member)) if !member.contains('.') => {
+                if let Some(ValueType::Shape(fields)) = env.get_mut(owner) {
+                    Self::set_shape_field(fields, member, ty);
+                }
+            }
+            Some(_) => {}
+            None => {
+                env.insert(name.to_string(), ty);
+            }
+        }
+    }
+
+    /// 引数を束縛した、関数本体用の型環境。
+    fn bind_params(
+        &self,
+        env: &HashMap<String, ValueType>,
+        params: &[Param],
+    ) -> HashMap<String, ValueType> {
+        let mut child = env.clone();
+        for param in params {
+            if let Param::Named { name, ty } = param {
+                child.insert(
+                    name.clone(),
+                    ty.as_ref()
+                        .map(|ty| self.type_from_annotation(ty))
+                        .unwrap_or(ValueType::Unknown),
+                );
+            }
+        }
+        child
+    }
+
+    /// `template` のない関数の型。引数は検査せず、戻り値は注釈か `return` から決める。
+    fn inferred_function(
+        &self,
+        params: &[Param],
+        return_type: Option<&TypeExpr>,
+        returns: Vec<ValueType>,
+    ) -> ValueType {
+        let ret = match return_type {
+            Some(ty) => self.type_from_annotation(ty),
+            None => Self::merge_return_types(returns),
+        };
+        let has_vararg = params.iter().any(|param| matches!(param, Param::Vararg));
+        ValueType::FunctionSig(Box::new(FnSig {
+            type_params: Vec::new(),
+            params: params
+                .iter()
+                .filter(|param| matches!(param, Param::Named { .. }))
+                .map(|_| ValueType::Unknown)
+                .collect(),
+            vararg: has_vararg.then_some(ValueType::Unknown),
+            ret,
+            check_args: false,
+        }))
+    }
+
+    /// 関数式(`function() ... end`、`local function`)の型。本体も歩いて戻り値を推論する。
+    fn infer_function_expr(
+        &mut self,
+        type_params: &[String],
+        params: &[Param],
+        return_type: Option<&TypeExpr>,
+        body: &[Stmt],
+        env: &HashMap<String, ValueType>,
+    ) -> ValueType {
+        let saved_scope = self.scope_params.len();
+        self.scope_params.extend(type_params.iter().cloned());
+        let mut child = self.bind_params(env, params);
+        self.return_types.push(Vec::new());
+        for stmt in body {
+            self.check_stmt_types(stmt, &mut child);
+        }
+        let returns = self.return_types.pop().unwrap_or_default();
+        let ty = if type_params.is_empty() {
+            self.inferred_function(params, return_type, returns)
+        } else {
+            ValueType::FunctionSig(Box::new(self.build_sig(type_params, params, return_type, None)))
+        };
+        self.scope_params.truncate(saved_scope);
+        ty
+    }
+
+    /// 全ての `return` の型を1つにまとめる。食い違えば Unknown。
+    fn merge_return_types(returns: Vec<ValueType>) -> ValueType {
+        let mut merged: Option<ValueType> = None;
+        for next in returns {
+            merged = Some(match merged {
+                None => next,
+                Some(current) if Self::is_assignable(&current, &next) => current,
+                Some(current) if Self::is_assignable(&next, &current) => next,
+                Some(ValueType::Nil) => ValueType::Optional(Box::new(next)),
+                Some(current) if next == ValueType::Nil => ValueType::Optional(Box::new(current)),
+                Some(_) => return ValueType::Unknown,
+            });
+        }
+        merged.unwrap_or(ValueType::Nil)
+    }
+
+    /// `left or right` の型。
+    fn or_result_type(left: ValueType, right: ValueType) -> ValueType {
+        let stripped = Self::truthy_refinement(left);
+        if stripped == ValueType::Unknown {
+            return right;
+        }
+        if Self::is_assignable(&stripped, &right) {
+            stripped
+        } else if Self::is_assignable(&right, &stripped) {
+            right
+        } else {
+            ValueType::Unknown
+        }
+    }
+
+    /// `obj_type` のインスタンスが持つ、公開のインスタンスメソッド `name` か
+    /// (`static` と演算子は含まない)。`T?` の受け手は `T` として見る。
+    fn is_instance_method(&self, obj_type: &ValueType, name: &str) -> bool {
+        let receiver = match obj_type {
+            ValueType::Optional(inner) => inner.as_ref(),
+            other => other,
+        };
+        let ValueType::Class(class, _) = receiver else {
+            return false;
+        };
+        self.lookup_method_in_ancestors(name, class).is_some_and(|info| {
+            !info.method.is_static && !info.method.is_operator && info.access == Access::Public
+        })
+    }
+
+    /// 標準ライブラリの `namespace.member` の型。
+    fn builtin_member(&self, namespace: &str, member: &str) -> Option<ValueType> {
+        let builtins = self.builtins.as_ref()?;
+        let (_, ty) = builtins
+            .global_types
+            .iter()
+            .find(|(name, _)| name == namespace)?;
+        let TypeExpr::Table(fields) = ty else {
+            return None;
+        };
+        let (_, field) = fields.iter().find(|(name, _)| name == member)?;
+        Some(self.type_from_annotation(field))
+    }
+
+    fn declared_function_type(
+        &self,
+        function: &DeclaredFunction,
+        module: Option<&str>,
+    ) -> ValueType {
+        ValueType::FunctionSig(Box::new(self.build_sig(
+            &function.type_params,
+            &function.params,
+            function.return_type.as_ref(),
+            module,
+        )))
     }
 
     /// `local x: Box<number>` のような型注釈の型引数の個数などを検査する。

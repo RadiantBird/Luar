@@ -54,6 +54,12 @@ impl Checker {
                 ValueType::Optional(Box::new(self.resolve_annotation(inner, ctx)))
             }
             TypeExpr::Tuple(_) => ValueType::Unknown,
+            TypeExpr::Union(members) => ValueType::union_of(
+                members
+                    .iter()
+                    .map(|member| self.resolve_annotation(member, ctx))
+                    .collect(),
+            ),
             // 要素の型は追跡せず、形の分からないテーブルとして扱う。
             TypeExpr::Array(_) => ValueType::Table,
             TypeExpr::Name(name) => self.resolve_named(name, &[], ty, ctx),
@@ -65,15 +71,26 @@ impl Checker {
                     .map(|(name, field)| (name.clone(), self.resolve_annotation(field, ctx)))
                     .collect(),
             },
-            TypeExpr::Function { params, ret } => ValueType::FunctionSig(Box::new(FnSig {
-                type_params: Vec::new(),
-                params: params
-                    .iter()
-                    .map(|param| self.resolve_annotation(param, ctx))
-                    .collect(),
-                vararg: false,
-                ret: self.resolve_annotation(ret, ctx),
-            })),
+            TypeExpr::Function { params, ret } => {
+                let mut resolved = Vec::new();
+                let mut vararg = None;
+                for param in params {
+                    match param {
+                        TypeExpr::Vararg(element) => {
+                            vararg = Some(self.resolve_annotation(element, ctx));
+                        }
+                        other => resolved.push(self.resolve_annotation(other, ctx)),
+                    }
+                }
+                ValueType::FunctionSig(Box::new(FnSig {
+                    type_params: Vec::new(),
+                    params: resolved,
+                    vararg,
+                    ret: self.resolve_annotation(ret, ctx),
+                    check_args: true,
+                }))
+            }
+            TypeExpr::Vararg(element) => self.resolve_annotation(element, ctx),
         }
     }
 
@@ -175,8 +192,12 @@ impl Checker {
         match ty {
             ValueType::Generic(name) => bindings.get(name).cloned().unwrap_or_else(|| ty.clone()),
             ValueType::Optional(inner) => {
-                ValueType::Optional(Box::new(Self::substitute(inner, bindings)))
+                ValueType::union_of(vec![
+                    Self::substitute(inner, bindings),
+                    ValueType::Nil,
+                ])
             }
+            ValueType::Union(members) => ValueType::union_of(each(members, bindings)),
             ValueType::Shape(items) => ValueType::Shape(fields(items)),
             ValueType::Record { name, fields: items } => ValueType::Record {
                 name: name.clone(),
@@ -192,8 +213,9 @@ impl Checker {
                 ValueType::FunctionSig(Box::new(FnSig {
                     type_params: sig.type_params.clone(),
                     params: each(&sig.params, &inner),
-                    vararg: sig.vararg,
+                    vararg: sig.vararg.as_ref().map(|ty| Self::substitute(ty, &inner)),
                     ret: Self::substitute(&sig.ret, &inner),
+                    check_args: sig.check_args,
                 }))
             }
             _ => ty.clone(),
@@ -371,10 +393,10 @@ impl Checker {
                     self.validate_type(arg, validation);
                 }
             }
-            TypeExpr::Optional(inner) | TypeExpr::Array(inner) => {
+            TypeExpr::Optional(inner) | TypeExpr::Array(inner) | TypeExpr::Vararg(inner) => {
                 self.validate_type(inner, validation)
             }
-            TypeExpr::Tuple(types) => {
+            TypeExpr::Tuple(types) | TypeExpr::Union(types) => {
                 for ty in types {
                     self.validate_type(ty, validation);
                 }
@@ -449,14 +471,15 @@ impl Checker {
         let mut sig = FnSig {
             type_params: type_params.to_vec(),
             params: Vec::new(),
-            vararg: false,
+            vararg: None,
             ret: return_type
                 .map(|ty| self.resolve_annotation(ty, &ctx))
                 .unwrap_or(ValueType::Unknown),
+            check_args: true,
         };
         for param in params {
             match param {
-                Param::Vararg => sig.vararg = true,
+                Param::Vararg => sig.vararg = Some(ValueType::Unknown),
                 Param::Named { ty, .. } => sig.params.push(
                     ty.as_ref()
                         .map(|ty| self.resolve_annotation(ty, &ctx))
@@ -476,24 +499,37 @@ impl Checker {
         args: &[crate::ast::Expr],
         arg_types: &[ValueType],
     ) -> ValueType {
+        if !sig.check_args {
+            return sig.ret.clone();
+        }
         let callee_span = Self::expr_span(callee);
         let required = sig
             .params
             .iter()
             .rposition(|param| !Self::is_omittable(param))
             .map_or(0, |index| index + 1);
-        if (!sig.vararg && args.len() > sig.params.len()) || args.len() < required {
+        if (sig.vararg.is_none() && args.len() > sig.params.len()) || args.len() < required {
+            let maximum = sig.params.len();
+            let expected = if sig.vararg.is_none() && required == maximum {
+                maximum.to_string()
+            } else if args.len() < required {
+                format!("at least {required}")
+            } else {
+                format!("at most {maximum}")
+            };
             self.report_call_error(
                 format!(
-                    "function '{callee_name}' expects {} argument(s), got {}",
-                    sig.params.len(),
+                    "function '{callee_name}' expects {expected} argument(s), got {}",
                     args.len()
                 ),
                 callee_span,
             );
         }
         let mut bindings = HashMap::new();
-        for (index, (param, actual)) in sig.params.iter().zip(arg_types).enumerate() {
+        for (index, actual) in arg_types.iter().enumerate() {
+            let Some(param) = sig.params.get(index).or(sig.vararg.as_ref()) else {
+                break;
+            };
             let result = Self::unify(
                 param,
                 actual,
@@ -679,5 +715,59 @@ impl Checker {
                 .unwrap_or_default(),
             _ => String::new(),
         }
+    }
+}
+
+// ─── 型キャスト ─────────────────────────────────────────────────────────────
+
+impl Checker {
+    /// `from :: to` を許すか。元と先が関連する型(一方が他方へ代入できる、継承関係にある、
+    /// `T?` から `T` への絞り込み、Unknown など)のときだけ許す。
+    pub(super) fn cast_allowed(&self, from: &ValueType, to: &ValueType) -> bool {
+        // ユニオンは、どれか1つのメンバーが関連していれば許す。
+        if let ValueType::Union(members) = from {
+            return members.iter().any(|member| self.cast_allowed(member, to));
+        }
+        if let ValueType::Union(members) = to {
+            return members.iter().any(|member| self.cast_allowed(from, member));
+        }
+        if from.is_opaque() || to.is_opaque() {
+            return true;
+        }
+        if Self::is_assignable(to, from) || Self::is_assignable(from, to) {
+            return true;
+        }
+        match (from, to) {
+            (ValueType::Optional(inner), other) | (other, ValueType::Optional(inner)) => {
+                self.cast_allowed(inner, other)
+            }
+            (ValueType::Class(a, _), ValueType::Class(b, _)) => {
+                self.is_subclass(a, b) || self.is_subclass(b, a)
+            }
+            // `setmetatable({}, Dog) :: Dog` のように、テーブルをクラスとして扱う。
+            (ValueType::Table | ValueType::Shape(_) | ValueType::Record { .. }, ValueType::Class(..)) => {
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// `child` が `ancestor` と同じか、その子孫か。
+    fn is_subclass(&self, child: &str, ancestor: &str) -> bool {
+        let mut current = Some(child.to_string());
+        let mut seen = std::collections::HashSet::new();
+        while let Some(name) = current {
+            if name == ancestor {
+                return true;
+            }
+            if !seen.insert(name.clone()) {
+                return false;
+            }
+            current = self
+                .classes
+                .get(&name)
+                .and_then(|class| class.parent_name.clone());
+        }
+        false
     }
 }

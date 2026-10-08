@@ -29,6 +29,11 @@ fn has_typed_param(params: &[Param]) -> bool {
         .any(|param| matches!(param, Param::Named { ty: Some(_), .. }))
 }
 
+/// `-- cast: tonumber(a) :: number`。`indent` は文のインデント。
+pub fn cast_comment(indent: &str, cast: &str) -> String {
+    format!("{indent}-- cast: {cast}")
+}
+
 /// `-- export type MyTable<T> = { id: number, ref: T }`
 pub fn type_alias_comment(
     is_export: bool,
