@@ -62,7 +62,7 @@ interface CompilerDiagnostic {
 const SEMANTIC_TOKEN_TYPES = [
   "namespace", "class", "function", "method", "variable", "parameter", "property", "type", "keyword",
 ] as const;
-const SEMANTIC_TOKEN_MODIFIERS = ["declaration", "readonly", "static"] as const;
+const SEMANTIC_TOKEN_MODIFIERS = ["declaration", "readonly", "static", "defaultLibrary"] as const;
 
 interface CompilerSemanticToken {
   line: number;

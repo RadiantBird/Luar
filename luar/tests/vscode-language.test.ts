@@ -92,4 +92,69 @@ describe("VS Code module definitions", () => {
   it("does not recognize legacy imports as module definitions", () => {
     expect(indexDocument("import qaz\nqaz.").symbols.some((symbol) => symbol.kind === "module")).toBe(false);
   });
+  it("accepts type declarations, template headers and declare function", () => {
+    const source = [
+      "type Arithmetic = Vector3 | number",
+      "",
+      "template <T>",
+      "export type MyTable = { id: number, ref: T }",
+      "",
+      "template <T>",
+      "declare function add(a: T, b: T): number",
+      "declare global function log(message: string, ...)",
+      "declare list: { number }",
+      "declare pair: MyTable<number>",
+      "declare maybe: (number | string)?",
+      "declare run: (string, ...number) -> boolean | nil",
+      "declare version: string",
+      "",
+    ].join("\n");
+    const result = parseModuleDefinition("m", source);
+
+    expect(result.errors).toEqual([]);
+    expect(result.definition?.members.map((member) => member.name)).toEqual(["add", "list", "pair", "maybe", "run", "version"]);
+    expect(result.definition?.globals.map((member) => member.name)).toEqual(["log"]);
+    expect(result.definition?.members[0]).toMatchObject({ typeText: "(a: T, b: T): number" });
+  });
+
+  it("accepts classes with generic and operator methods after a type declaration", () => {
+    const source = [
+      "type Arithmetic = Vector3 | number",
+      "",
+      "declare class Vector3 is",
+      "    public is",
+      "        x: number",
+      "        function length(v: Vector3): number",
+      "        template <A> function scale(v: Vector3, k: A): Vector3",
+      "        function operator*(a: Vector3, b: Arithmetic): Vector3",
+      "        function operator/(a: Vector3, b: Arithmetic): Vector3",
+      "    end",
+      "end",
+      "",
+      "declare class Instance is",
+      "    public is",
+      "        template <T> function GetChildren(Inst: Instance): { T }",
+      "        function Destroy(Inst: Instance): ()",
+      "        static function new(classname: string): Instance?",
+      "    end",
+      "end",
+      "",
+    ].join("\n");
+    const result = parseModuleDefinition("RCBN", source);
+
+    expect(result.errors).toEqual([]);
+  });
+
+  it("explains that declared classes are already global", () => {
+    const result = parseModuleDefinition("m", "declare global class Instance is\n    public is\n    end\nend\ndeclare version: string\n");
+
+    expect(result.errors[0]?.message).toContain("a declared class is already global");
+  });
+
+  it("reports a malformed type alias and still reads the rest", () => {
+    const result = parseModuleDefinition("m", "type Broken = \ndeclare version: string\n");
+
+    expect(result.errors[0]?.message).toContain("expected type");
+    expect(result.definition?.members.map((member) => member.name)).toEqual(["version"]);
+  });
 });

@@ -89,6 +89,23 @@ export function parseModuleDefinition(moduleName: string, source: string, filePa
   const names = new Set<string>();
   let pos = 0;
   while (tokens[pos]?.kind !== "EOF") {
+    pos = skipTemplateHeader(tokens, pos);
+    if (startsTypeAlias(tokens, pos)) {
+      // `[export] type Name = Type`。エディタ側は構文だけを確かめる。
+      if (isIdent(tokens, pos, "export")) pos++;
+      pos++; // `type`
+      const aliasName = tokens[pos]!;
+      pos += 2; // 名前と `=`
+      const aliasEnd = parseDefinitionType(tokens, pos);
+      if (aliasEnd < 0) {
+        const bad = tokens[pos] ?? aliasName;
+        errors.push(moduleError(filePath, bad.line, bad.col, "expected type"));
+        pos = nextDeclaration(tokens, pos);
+        continue;
+      }
+      pos = aliasEnd;
+      continue;
+    }
     const declare = tokens[pos];
     if (!declare || declare.kind !== "declare") {
       errors.push(moduleError(filePath, declare?.line ?? 1, declare?.col ?? 1, "expected 'declare'"));
@@ -111,6 +128,42 @@ export function parseModuleDefinition(moduleName: string, source: string, filePa
     }
     const isGlobal = tokens[pos]?.kind === "global";
     if (isGlobal) pos++;
+    if (isGlobal && tokens[pos]?.kind === "class") {
+      const bad = tokens[pos]!;
+      errors.push(moduleError(
+        filePath,
+        bad.line,
+        bad.col,
+        "a declared class is already global; use `declare class Name is ... end` without 'global'",
+      ));
+      pos = nextDeclaration(tokens, pos);
+      continue;
+    }
+    if (tokens[pos]?.kind === "function") {
+      const parsed = parseDeclaredFunction(tokens, pos);
+      if (!parsed.ok) {
+        errors.push(moduleError(filePath, parsed.line, parsed.col, parsed.message));
+        pos = nextDeclaration(tokens, pos);
+        continue;
+      }
+      pos = parsed.end;
+      const functionName = parsed.name;
+      if (names.has(functionName.value)) {
+        errors.push(moduleError(filePath, functionName.line, functionName.col, `name '${functionName.value}' is declared more than once`));
+      } else {
+        names.add(functionName.value);
+        declarations.push({
+          name: functionName.value,
+          isGlobal,
+          typeText: sourceTextBetween(source, parsed.open, tokens[pos - 1]!),
+          line: functionName.line - 1,
+          col: functionName.col - 1,
+          endLine: tokens[pos - 1]!.line - 1,
+          endCol: tokens[pos - 1]!.col - 1 + tokens[pos - 1]!.value.length,
+        });
+      }
+      continue;
+    }
     const name = tokens[pos];
     if (!name || name.kind !== "Ident") {
       errors.push(moduleError(filePath, name?.line ?? declare.line, name?.col ?? declare.col, "expected identifier"));
@@ -334,39 +387,159 @@ function findClassBodyEnd(tokens: Token[], classPos: number, methodsHaveBodies: 
   return tokens.length - 1;
 }
 
-function parseDefinitionType(tokens: Token[], start: number): number {
-  let pos = start;
-  if (tokens[pos]?.kind === "(") {
-    pos++;
-    if (tokens[pos]?.kind !== ")") {
-      const first = parseDefinitionType(tokens, pos);
-      if (first < 0) return -1;
-      pos = first;
-      while (tokens[pos]?.kind === ",") {
-        const next = parseDefinitionType(tokens, pos + 1);
-        if (next < 0) return -1;
-        pos = next;
+function kindOf(tokens: Token[], pos: number): string | undefined {
+  return tokens[pos]?.kind as string | undefined;
+}
+
+function isIdent(tokens: Token[], pos: number, value: string): boolean {
+  return tokens[pos]?.kind === "Ident" && tokens[pos]!.value === value;
+}
+
+/** `template <T, U>` を読み飛ばす。なければ位置はそのまま。 */
+function skipTemplateHeader(tokens: Token[], pos: number): number {
+  if (!isIdent(tokens, pos, "template") || kindOf(tokens, pos + 1) !== "<" || kindOf(tokens, pos + 2) !== "Ident") {
+    return pos;
+  }
+  let next = pos + 2;
+  while (kindOf(tokens, next) === "Ident") {
+    next++;
+    if (kindOf(tokens, next) === ",") next++;
+    else break;
+  }
+  return kindOf(tokens, next) === ">" ? next + 1 : next;
+}
+
+/** `[export] type Name = ...` か。 */
+function startsTypeAlias(tokens: Token[], pos: number): boolean {
+  const at = isIdent(tokens, pos, "export") ? pos + 1 : pos;
+  return isIdent(tokens, at, "type") && kindOf(tokens, at + 1) === "Ident" && kindOf(tokens, at + 2) === "=";
+}
+
+type DeclaredFunctionResult =
+  | { ok: true; end: number; name: Token; open: Token }
+  | { ok: false; line: number; col: number; message: string };
+
+/** `function name(params)[: Return]`。`function` の位置から読み、次のtoken番号を返す。 */
+function parseDeclaredFunction(tokens: Token[], start: number): DeclaredFunctionResult {
+  let pos = start + 1;
+  const name = tokens[pos];
+  if (!name || name.kind !== "Ident") {
+    return { ok: false, line: name?.line ?? 1, col: name?.col ?? 1, message: "expected identifier" };
+  }
+  pos++;
+  const open = tokens[pos];
+  if (!open || open.kind !== "(") {
+    return { ok: false, line: open?.line ?? name.line, col: open?.col ?? name.col, message: "expected '('" };
+  }
+  pos++;
+  while (kindOf(tokens, pos) !== ")") {
+    if (kindOf(tokens, pos) === "...") {
+      pos++;
+    } else if (kindOf(tokens, pos) === "Ident") {
+      pos++;
+      if (kindOf(tokens, pos) === ":") {
+        const typeEnd = parseDefinitionType(tokens, pos + 1);
+        if (typeEnd < 0) {
+          const bad = tokens[pos + 1] ?? tokens[pos]!;
+          return { ok: false, line: bad.line, col: bad.col, message: "expected type" };
+        }
+        pos = typeEnd;
       }
+    } else {
+      const bad = tokens[pos] ?? open;
+      return { ok: false, line: bad.line, col: bad.col, message: "expected parameter" };
     }
-    if (tokens[pos]?.kind !== ")") return -1;
-    pos++;
-    if (tokens[pos]?.kind === "->") {
-      const result = parseDefinitionType(tokens, pos + 1);
-      if (result < 0) return -1;
-      return result;
+    if (kindOf(tokens, pos) === ",") pos++;
+    else if (kindOf(tokens, pos) !== ")") {
+      const bad = tokens[pos] ?? open;
+      return { ok: false, line: bad.line, col: bad.col, message: "expected ')'" };
     }
-  } else if (tokens[pos]?.kind === "Ident") {
+  }
+  pos++; // `)`
+  if (kindOf(tokens, pos) === ":") {
+    const typeEnd = parseDefinitionType(tokens, pos + 1);
+    if (typeEnd < 0) {
+      const bad = tokens[pos + 1] ?? tokens[pos]!;
+      return { ok: false, line: bad.line, col: bad.col, message: "expected type" };
+    }
+    pos = typeEnd;
+  }
+  return { ok: true, end: pos, name, open };
+}
+
+/**
+ * 型式を1つ読み、次のtoken番号を返す。読めなければ -1。Rust側の文法に合わせて、
+ * ユニオン `A | B`、`Name<A, B>`、`mod.Name`、`{ a: T }`、`{ T }`、`(A, ...B) -> R`、`T?` を受け付ける。
+ */
+function parseDefinitionType(tokens: Token[], start: number): number {
+  let pos = parseSingleDefinitionType(tokens, start);
+  if (pos < 0) return -1;
+  while (kindOf(tokens, pos) === "|") {
+    pos = parseSingleDefinitionType(tokens, pos + 1);
+    if (pos < 0) return -1;
+  }
+  return pos;
+}
+
+function parseSingleDefinitionType(tokens: Token[], start: number): number {
+  let pos = start;
+  const kind = kindOf(tokens, pos);
+  if (kind === "(") {
     pos++;
+    while (kindOf(tokens, pos) !== ")") {
+      if (kindOf(tokens, pos) === "...") pos++;
+      const item = parseDefinitionType(tokens, pos);
+      if (item < 0) return -1;
+      pos = item;
+      if (kindOf(tokens, pos) === ",") pos++;
+      else if (kindOf(tokens, pos) !== ")") return -1;
+    }
+    pos++;
+    if (kindOf(tokens, pos) === "->") {
+      return parseDefinitionType(tokens, pos + 1);
+    }
+  } else if (kind === "{") {
+    pos++;
+    if (kindOf(tokens, pos) === "Ident" && kindOf(tokens, pos + 1) === ":") {
+      while (kindOf(tokens, pos) === "Ident" && kindOf(tokens, pos + 1) === ":") {
+        const field = parseDefinitionType(tokens, pos + 2);
+        if (field < 0) return -1;
+        pos = field;
+        if (kindOf(tokens, pos) === ",") pos++;
+        else break;
+      }
+    } else if (kindOf(tokens, pos) !== "}") {
+      const element = parseDefinitionType(tokens, pos);
+      if (element < 0) return -1;
+      pos = element;
+    }
+    if (kindOf(tokens, pos) !== "}") return -1;
+    pos++;
+  } else if (kind === "Ident" || kind === "nil") {
+    pos++;
+    while (kindOf(tokens, pos) === "." && kindOf(tokens, pos + 1) === "Ident") pos += 2;
+    if (kindOf(tokens, pos) === "<") {
+      pos++;
+      while (kindOf(tokens, pos) !== ">") {
+        const argument = parseDefinitionType(tokens, pos);
+        if (argument < 0) return -1;
+        pos = argument;
+        if (kindOf(tokens, pos) === ",") pos++;
+        else if (kindOf(tokens, pos) !== ">") return -1;
+      }
+      pos++;
+    }
   } else {
     return -1;
   }
-  if (tokens[pos]?.kind === "?") pos++;
+  if (kindOf(tokens, pos) === "?") pos++;
   return pos;
 }
 
 function nextDeclaration(tokens: Token[], start: number): number {
   for (let i = Math.max(start, 0); i < tokens.length; i++) {
     if (tokens[i]!.kind === "declare" || tokens[i]!.kind === "EOF") return i;
+    if (i > start && (startsTypeAlias(tokens, i) || skipTemplateHeader(tokens, i) !== i)) return i;
   }
   return tokens.length - 1;
 }
