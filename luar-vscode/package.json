@@ -91,14 +91,36 @@
         "path": "./snippets/luar.json"
       }
     ],
-    "configurationDefaults": {
-      "[luar]": {
-        "editor.minimap.enabled": false
+    "semanticTokenScopes": [
+      {
+        "language": "luar",
+        "scopes": {
+          "type": ["support.type.primitive.luar"],
+          "class": ["entity.name.type.class.luar"],
+          "namespace": ["entity.name.namespace.luar"],
+          "keyword": ["keyword.luar"],
+          "property": ["variable.other.property.luar"],
+          "parameter": ["variable.parameter.luar"],
+          "function.defaultLibrary": ["support.function.builtin.luar"],
+          "namespace.defaultLibrary": ["support.class.builtin.luar"],
+          "variable.defaultLibrary": ["support.constant.builtin.luar"]
+        }
       },
-      "[luard]": {
-        "editor.minimap.enabled": false
+      {
+        "language": "luard",
+        "scopes": {
+          "type": ["support.type.primitive.luar"],
+          "class": ["entity.name.type.class.luar"],
+          "namespace": ["entity.name.namespace.luar"],
+          "keyword": ["keyword.luar"],
+          "property": ["variable.other.property.luar"],
+          "parameter": ["variable.parameter.luar"],
+          "function.defaultLibrary": ["support.function.builtin.luar"],
+          "namespace.defaultLibrary": ["support.class.builtin.luar"],
+          "variable.defaultLibrary": ["support.constant.builtin.luar"]
+        }
       }
-    }
+    ]
   },
   "scripts": {
     "build": "node build.js",

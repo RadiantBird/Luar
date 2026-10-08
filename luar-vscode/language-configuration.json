@@ -27,8 +27,8 @@
   "wordPattern": "(-?\\d*\\.\\d\\w*)|([^\\`\\~\\!\\@\\#\\%\\^\\&\\*\\(\\)\\-\\=\\+\\[\\{\\]\\}\\|\\;\\:\\'\\\"\\,\\.\\<\\>\\/\\?\\s]+)",
   "folding": {
     "markers": {
-      "start": "\\b(function|do|class|public|private|if|while|for|repeat)\\b",
-      "end": "\\b(end|until)\\b"
+      "start": "^\\s*--\\s*#?region\\b",
+      "end": "^\\s*--\\s*#?endregion\\b"
     }
   },
   "indentationRules": {

@@ -12,12 +12,17 @@
     { "include": "#type-annotation" },
     { "include": "#const-decl" },
     { "include": "#import-decl" },
+    { "include": "#type-alias" },
+    { "include": "#template-header" },
     { "include": "#declare-decl" },
     { "include": "#binding-operator" },
     { "include": "#function-decl" },
     { "include": "#friend-decl" },
     { "include": "#class-decl" },
     { "include": "#label" },
+    { "include": "#cast-operator" },
+    { "include": "#type-operators" },
+    { "include": "#builtin" },
     { "include": "#keyword" },
     { "include": "#constant" }
   ],
@@ -37,11 +42,12 @@
       "end": "`",
       "patterns": [
         {
+          "name": "meta.template.expression.luar",
           "begin": "\\{",
           "end": "\\}",
-          "beginCaptures": { "0": { "name": "punctuation.section.embedded.begin.luar" } },
-          "endCaptures":   { "0": { "name": "punctuation.section.embedded.end.luar" } },
-          "patterns": [ { "include": "$self" } ]
+          "beginCaptures": { "0": { "name": "punctuation.definition.template-expression.begin.luar" } },
+          "endCaptures":   { "0": { "name": "punctuation.definition.template-expression.end.luar" } },
+          "patterns": [ { "include": "#template-expression" } ]
         },
         { "name": "constant.character.escape.luar", "match": "\\\\." }
       ]
@@ -77,7 +83,7 @@
     },
     "type-annotation": {
       "comment": "Primitive types following a Luar type annotation colon",
-      "match": "(:)([ \\t]*)(number|string|boolean|nil|table|function|any)\\b",
+      "match": "(:)([ \\t]*)(number|string|boolean|nil|table|function|any|unknown)\\b",
       "captures": {
         "1": { "name": "punctuation.separator.annotation.luar" },
         "3": { "name": "support.type.primitive.luar" }
@@ -94,12 +100,68 @@
     },
     "declare-decl": {
       "comment": "ambient declaration",
-      "match": "\\b(declare)\\b(?:[ \\t]+(global)\\b)?[ \\t]+([A-Za-z_][A-Za-z0-9_]*)",
+      "match": "\\b(declare)\\b(?:[ \\t]+(global)\\b)?(?:[ \\t]+(?!class\\b|function\\b)([A-Za-z_][A-Za-z0-9_]*))?",
       "captures": {
         "1": { "name": "keyword.control.declare.luar" },
         "2": { "name": "storage.modifier.global.luar" },
         "3": { "name": "variable.other.readwrite.luar" }
       }
+    },
+    "type-alias": {
+      "comment": "[export] type Name = ...",
+      "match": "(?:\\b(export)[ \\t]+)?\\b(type)\\b[ \\t]+([A-Za-z_][A-Za-z0-9_]*)(?=[ \\t]*=[^=])",
+      "captures": {
+        "1": { "name": "keyword.luar" },
+        "2": { "name": "keyword.luar" },
+        "3": { "name": "entity.name.type.alias.luar" }
+      }
+    },
+    "template-header": {
+      "comment": "template <T, U>: type parameters of the next declaration",
+      "match": "\\b(template)\\b[ \\t]*(<)([^>\\n]*)(>)",
+      "captures": {
+        "1": { "name": "keyword.luar" },
+        "2": { "name": "punctuation.definition.typeparameters.begin.luar" },
+        "3": { "patterns": [ { "match": "[A-Za-z_][A-Za-z0-9_]*", "name": "entity.name.type.parameter.luar" } ] },
+        "4": { "name": "punctuation.definition.typeparameters.end.luar" }
+      }
+    },
+    "cast-operator": {
+      "comment": "expr :: Type (a label ::name:: is handled by #label)",
+      "match": "::(?![ \\t]*[A-Za-z_][A-Za-z0-9_]*[ \\t]*::)",
+      "name": "keyword.operator.cast.luar"
+    },
+    "type-operators": {
+      "patterns": [
+        { "match": "->", "name": "keyword.operator.arrow.luar" },
+        { "match": "\\|", "name": "keyword.operator.type.union.luar" }
+      ]
+    },
+    "builtin": {
+      "comment": "standard library names; the compiler's semantic tokens take over when available",
+      "patterns": [
+        {
+          "match": "(?<![.:\\w])\\b(assert|collectgarbage|dofile|error|gcinfo|getfenv|getmetatable|ipairs|load|loadfile|newproxy|next|pairs|pcall|print|rawequal|rawget|rawlen|rawset|require|select|setfenv|setmetatable|tonumber|tostring|type|typeof|warn|xpcall)\\b(?=[ \\t]*[(\"'{`])",
+          "name": "support.function.builtin.luar"
+        },
+        {
+          "match": "(?<![.:\\w])\\b(bit32|buffer|coroutine|debug|io|math|os|package|string|table|task|utf8)\\b(?=[ \\t]*\\.)",
+          "name": "support.class.builtin.luar"
+        }
+      ]
+    },
+    "template-expression": {
+      "comment": "the expression inside {} of a template string",
+      "patterns": [
+        { "include": "#string" },
+        { "include": "#number" },
+        { "include": "#cast-operator" },
+        { "include": "#builtin" },
+        { "include": "#keyword" },
+        { "include": "#constant" },
+        { "match": "(?<=[.:])[A-Za-z_][A-Za-z0-9_]*", "name": "variable.other.property.luar" },
+        { "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b", "name": "variable.other.readwrite.luar" }
+      ]
     },
     "binding-operator": {
       "comment": "condition-only local binding operator",
