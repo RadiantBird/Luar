@@ -10,6 +10,7 @@ pub mod navigation;
 pub mod parser;
 pub mod rename;
 pub mod symbols;
+pub mod type_comment;
 pub mod resolver;
 
 use crate::lexer::SourceSpan;

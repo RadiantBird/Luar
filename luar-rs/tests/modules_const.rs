@@ -691,7 +691,13 @@ fn luard_declare_class_types_module_members() {
 #[test]
 fn luard_declare_class_emits_no_runtime_code() {
     let output = compile_with_dog_luard("local d: Dog = clsdef.dog\n").unwrap();
-    assert!(!output.contains("Dog"), "{output}");
+    // 型注釈は元のシグネチャーのコメントとして残るが、実行コードには現れない。
+    assert!(output.contains("-- local d: Dog"), "{output}");
+    let code: Vec<&str> = output
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("--"))
+        .collect();
+    assert!(!code.join("\n").contains("Dog"), "{output}");
 }
 
 #[test]

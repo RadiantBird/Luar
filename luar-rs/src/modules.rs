@@ -1,4 +1,4 @@
-use crate::ast::{ClassDecl, Param, TypeExpr};
+use crate::ast::{ClassDecl, Param, Stmt, TypeExpr};
 use crate::lexer::{Lexer, Token, TokenKind};
 use crate::parser::Parser;
 use std::collections::HashSet;
@@ -14,10 +14,30 @@ pub struct DeclaredMethod {
     pub is_static: bool,
 }
 
+/// `.luard` の `declare [global] function`。本体は持たない。
+#[derive(Debug, Clone)]
+pub struct DeclaredFunction {
+    pub name: String,
+    pub is_global: bool,
+    pub type_params: Vec<String>,
+    pub params: Vec<Param>,
+    pub return_type: Option<TypeExpr>,
+}
+
+/// `.luard` の `[export] type`。`export` のないものは同じ `.luard` の中だけで使える。
+#[derive(Debug, Clone)]
+pub struct DeclaredType {
+    pub name: String,
+    pub is_export: bool,
+    pub type_params: Vec<String>,
+    pub ty: TypeExpr,
+}
+
 /// `.luard` の `declare class`。メンバーはすべてpublic。
 #[derive(Debug, Clone)]
 pub struct DeclaredClass {
     pub name: String,
+    pub type_params: Vec<String>,
     pub parent: Option<String>,
     pub fields: Vec<(String, TypeExpr)>,
     pub methods: Vec<DeclaredMethod>,
@@ -35,6 +55,8 @@ pub struct ModuleDefinition {
     pub member_types: Vec<(String, TypeExpr)>,
     pub global_types: Vec<(String, TypeExpr)>,
     pub classes: Vec<DeclaredClass>,
+    pub functions: Vec<DeclaredFunction>,
+    pub types: Vec<DeclaredType>,
 }
 
 #[derive(Debug, Clone)]
@@ -90,12 +112,43 @@ pub fn parse_definition(
     let mut member_types = Vec::new();
     let mut global_types = Vec::new();
     let mut classes = Vec::new();
+    let mut functions = Vec::new();
+    let mut types: Vec<DeclaredType> = Vec::new();
     let mut all_names = HashSet::new();
 
     while !parser.at(TokenKind::Eof) {
+        let type_params = parser.parse_template_header()?;
+        if let Some(declared) = parser.parse_declared_type(&type_params)? {
+            if types.iter().any(|ty| ty.name == declared.name) {
+                return Err(parser.error(
+                    parser.previous_line(),
+                    format!("type '{}' is declared more than once", declared.name),
+                ));
+            }
+            types.push(declared);
+            continue;
+        }
         parser.expect(TokenKind::Declare, "'declare'")?;
+        if parser.at(TokenKind::Function) || parser.at_global_function() {
+            let is_global = parser.take(TokenKind::Global);
+            let function = parser.parse_declared_function(is_global, type_params)?;
+            if !all_names.insert(function.name.clone()) {
+                return Err(parser.error(
+                    parser.previous_line(),
+                    format!("name '{}' is declared more than once", function.name),
+                ));
+            }
+            if function.is_global {
+                globals.insert(function.name.clone());
+            } else {
+                members.insert(function.name.clone());
+            }
+            functions.push(function);
+            continue;
+        }
         if parser.at(TokenKind::Class) {
-            let class = parser.parse_declared_class()?;
+            let mut class = parser.parse_declared_class()?;
+            class.type_params = type_params;
             if !all_names.insert(class.name.clone()) {
                 return Err(parser.error(
                     parser.previous_line(),
@@ -104,6 +157,13 @@ pub fn parse_definition(
             }
             classes.push(class);
             continue;
+        }
+        if !type_params.is_empty() {
+            return Err(parser.error(
+                parser.previous_line(),
+                "'template' can only be applied to a type, 'declare function' or 'declare class'"
+                    .to_string(),
+            ));
         }
         let is_global = parser.take(TokenKind::Global);
         let (name, line) = parser.expect_ident()?;
@@ -128,6 +188,8 @@ pub fn parse_definition(
         member_types,
         global_types,
         classes,
+        functions,
+        types,
     })
 }
 
@@ -215,6 +277,7 @@ impl DefinitionParser<'_> {
             return Ok(DeclaredClass {
                 name: decl.name.clone(),
                 parent: decl.parent.clone(),
+                type_params: Vec::new(),
                 fields: Vec::new(),
                 methods: Vec::new(),
                 decl: Some(decl),
@@ -284,6 +347,7 @@ impl DefinitionParser<'_> {
         }
         Ok(DeclaredClass {
             name,
+            type_params: Vec::new(),
             parent,
             fields,
             methods,
@@ -314,46 +378,86 @@ impl DefinitionParser<'_> {
         }
     }
 
-    /// Parses the type grammar accepted by `.luard` files.  This intentionally
-    /// remains separate from Luar's general `TypeExpr`: function types are a
-    /// declaration-file feature for now, and are represented as `function`.
+    /// `.luard` の型式。`.luar` と同じ文法を共有パーサーで読む。
     fn parse_definition_type(&mut self) -> Result<TypeExpr, ModuleError> {
-        let mut ty = if self.take(TokenKind::LParen) {
-            let list = self.parse_definition_type_list()?;
-            self.expect(TokenKind::RParen, "')'")?;
-            if self.take(TokenKind::Arrow) {
-                self.parse_definition_type()?;
-                TypeExpr::Name("function".to_string())
-            } else {
-                TypeExpr::Tuple(list)
-            }
-        } else {
-            TypeExpr::Name(self.expect_ident()?.0)
-        };
-        if self.take(TokenKind::Question) {
-            ty = TypeExpr::Optional(Box::new(ty));
-        }
-        if self.at(TokenKind::Arrow) {
-            return Err(self.error(
-                self.token().line,
-                "function type parameters must be enclosed in parentheses; use `(T) -> U`"
-                    .to_string(),
-            ));
-        }
+        let mut parser = Parser::from_tokens(self.tokens[self.pos..].to_vec());
+        let ty = parser
+            .parse_type()
+            .map_err(|error| self.error(error.span.line, error.message))?;
+        self.pos += parser.position();
         Ok(ty)
     }
 
-    fn parse_definition_type_list(&mut self) -> Result<Vec<TypeExpr>, ModuleError> {
-        let mut list = Vec::new();
-        if self.at(TokenKind::RParen) {
-            return Ok(list);
-        }
+    /// `template <T, U>`。なければ空。
+    fn parse_template_header(&mut self) -> Result<Vec<String>, ModuleError> {
+        let mut parser = Parser::from_tokens(self.tokens[self.pos..].to_vec());
+        let type_params = parser
+            .parse_optional_template_header()
+            .map_err(|error| self.error(error.span.line, error.message))?;
+        self.pos += parser.position();
+        Ok(type_params)
+    }
 
-        list.push(self.parse_definition_type()?);
-        while self.take(TokenKind::Comma) {
-            list.push(self.parse_definition_type()?);
+    /// 現在位置が `[export] type Name = ...` ならそれを読む。
+    fn parse_declared_type(
+        &mut self,
+        type_params: &[String],
+    ) -> Result<Option<DeclaredType>, ModuleError> {
+        let mut parser = Parser::from_tokens(self.tokens[self.pos..].to_vec());
+        if !parser.starts_type_alias() {
+            return Ok(None);
         }
-        Ok(list)
+        let stmt = parser
+            .parse_type_alias_with(type_params.to_vec())
+            .map_err(|error| self.error(error.span.line, error.message))?;
+        self.pos += parser.position();
+        let Stmt::TypeAlias {
+            is_export,
+            name,
+            type_params,
+            ty,
+            ..
+        } = stmt
+        else {
+            unreachable!("parse_type_alias_with always returns a type alias");
+        };
+        Ok(Some(DeclaredType {
+            name,
+            is_export,
+            type_params,
+            ty,
+        }))
+    }
+
+    /// `declare global function` の `global` を読む前か。
+    fn at_global_function(&self) -> bool {
+        self.at(TokenKind::Global)
+            && self.tokens.get(self.pos + 1).map(|token| &token.kind) == Some(&TokenKind::Function)
+    }
+
+    /// `function name(params)[: Return]`。呼び出し時点で `function` の前。
+    fn parse_declared_function(
+        &mut self,
+        is_global: bool,
+        type_params: Vec<String>,
+    ) -> Result<DeclaredFunction, ModuleError> {
+        self.expect(TokenKind::Function, "'function'")?;
+        let (name, _) = self.expect_ident()?;
+        self.expect(TokenKind::LParen, "'('")?;
+        let params = self.parse_declared_params()?;
+        self.expect(TokenKind::RParen, "')'")?;
+        let return_type = if self.take(TokenKind::Colon) {
+            Some(self.parse_definition_type()?)
+        } else {
+            None
+        };
+        Ok(DeclaredFunction {
+            name,
+            is_global,
+            type_params,
+            params,
+            return_type,
+        })
     }
 
     fn error(&self, line: usize, message: String) -> ModuleError {

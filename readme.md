@@ -94,6 +94,55 @@ local c = a + b -- error: '+' はnumber同士だけに使用できる
 
 `love.timer.getTime()`のような外部runtime由来の値は静的に型を断定できないため、推論だけで拒否しない。必要なら戻り値を`.luard`の宣言やローカル注釈で表す。
 
+### 型宣言とジェネリクス(`type` / `template`)
+
+`type`で型に名前を付けられる。`template <T>`は**直後の宣言1つだけ**に効く型引数で、`type`・`export type`・`declare function`・`function`定義(`local function`/`const function`も可)・`class`に付けられる。2つ目の宣言でも`T`を使うなら、その宣言にも`template <T>`が必要である。
+
+```lua
+template <T>
+export type MyTable = { id: number, ref: T }
+
+local t: MyTable<number> = { id = 1, ref = 2 }
+local bad: MyTable<number> = { id = 1, ref = "x" } -- error: field 'ref' expects number, got string
+
+template <T>
+function first(a: T, b: T): T
+    return a
+end
+first(1, "x") -- error: type parameter 'T' was inferred as number but argument 2 is string
+```
+
+型式は`Name<A, B>`、`mod.Name`、テーブル型`{ id: number, ref: T }`、関数型`(A, B) -> R`、`T?`を書ける。`type`と`export`と`template`は文脈依存のキーワードで、`type(x)`のような既存の識別子の使い方は変わらない。
+
+`.luard`では`declare function`(`declare global function`も可)と`export type`を書ける。`export type`した型は`import type`した後に`mod.MyTable<number>`で参照する。`export`のない`type`は、その`.luard`の中だけで使える。`declare function`は`.luar`では使えない。
+
+```lua
+-- m.luard
+template <T>
+export type MyTable = { id: number, ref: T }
+
+template <T>
+declare function add(a: T, b: T): number
+
+-- main.luar
+import type m
+local t: m.MyTable<string> = { id = 1, ref = "x" }
+m.add(1, 2)
+m.add(1, "a") -- error: type parameter 'T' was inferred as number but argument 2 is string
+```
+
+呼び出しの型検査は、`declare function`と`template`つきの関数だけが対象である。`template`のない通常の`function f(a: number)`の呼び出しは従来どおり検査しない。型の宣言内で未定義の型名(`template`を書き忘れた`T`など)はエラーになるが、通常の`local x: Foo`の未知の型名は従来どおりエラーにしない。
+
+型は生成コードでは消去されるが、元の宣言を直前の1行コメントとして書き出す(Luau/Lua 5.4共通)。コンパイラの不具合調査用である。
+
+```lua
+-- export type MyTable<T> = { id: number, ref: T }
+-- local score: number, name
+local score, name = 0, "x"
+-- function first<T>(a: T, b: T): T
+function first(a, b) ... end
+```
+
 ## 概要
 Luau言語から派生し、ついにオブジェクト指向・テーブルのディープコピーを実現。
 

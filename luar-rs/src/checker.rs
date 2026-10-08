@@ -7,6 +7,10 @@ use crate::lexer::SourceSpan;
 use crate::modules::{DeclaredClass, ModuleDefinition};
 use std::collections::{HashMap, HashSet};
 
+mod annotation;
+
+use annotation::AliasInfo;
+
 #[derive(Debug, Clone)]
 pub struct CheckError {
     pub message: String,
@@ -17,6 +21,7 @@ pub struct CheckError {
 #[derive(Clone)]
 struct ClassInfo {
     name: String,
+    type_params: Vec<String>,
     is_abstract: bool,
     parent_name: Option<String>,
     methods: HashMap<String, MethodInfo>,
@@ -59,11 +64,40 @@ enum ValueType {
     /// リテラルや、`mod.x = 1` による追加で形が決まる。順序は宣言順。
     Shape(Vec<(String, ValueType)>),
     Function,
-    Class(String),
+    /// 引数型・戻り値型が分かっている関数 (`declare function` や `template` つきの関数)。
+    FunctionSig(Box<FnSig>),
+    /// `template <T>` で宣言された型引数。宣言の本体の中だけに現れる。
+    Generic(String),
+    /// 注釈由来の構造的なテーブル型 (`MyTable<number>` や `{ id: number }`)。
+    /// `name` は表示用で、フィールドは宣言順。
+    Record {
+        name: String,
+        fields: Vec<(String, ValueType)>,
+    },
+    /// クラスと、そのクラスの型引数 (`Box<number>`)。型引数が分からなければ空。
+    Class(String, Vec<ValueType>),
     Optional(Box<ValueType>),
 }
 
+/// 関数の署名。`type_params` はこの関数自身の型引数。
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FnSig {
+    type_params: Vec<String>,
+    params: Vec<ValueType>,
+    vararg: bool,
+    ret: ValueType,
+}
+
 impl ValueType {
+    fn is_function(&self) -> bool {
+        matches!(self, Self::Function | Self::FunctionSig(_))
+    }
+
+    /// 演算子の検査で、型を決めつけない値 (外部の値と宣言本体の型引数)。
+    fn is_opaque(&self) -> bool {
+        matches!(self, Self::Unknown | Self::Generic(_))
+    }
+
     fn display(&self) -> String {
         match self {
             Self::Unknown => "unknown".to_string(),
@@ -73,7 +107,22 @@ impl ValueType {
             Self::String => "string".to_string(),
             Self::Table | Self::Shape(_) => "table".to_string(),
             Self::Function => "function".to_string(),
-            Self::Class(name) => name.clone(),
+            Self::FunctionSig(sig) => format!(
+                "({}) -> {}",
+                sig.params
+                    .iter()
+                    .map(Self::display)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                sig.ret.display()
+            ),
+            Self::Generic(name) => name.clone(),
+            Self::Record { name, .. } => name.clone(),
+            Self::Class(name, args) if args.is_empty() => name.clone(),
+            Self::Class(name, args) => format!(
+                "{name}<{}>",
+                args.iter().map(Self::display).collect::<Vec<_>>().join(", ")
+            ),
             Self::Optional(inner) => format!("{}?", inner.display()),
         }
     }
@@ -90,6 +139,10 @@ pub struct Checker {
     probe_receiver: Option<ReceiverInfo>,
     /// `const` で宣言された名前。補完で種別を示すためだけに使う近似。
     const_names: HashSet<String>,
+    /// `type` 宣言。自ファイルは `Name`、`import type` したmoduleは `mod.Name` で引く。
+    aliases: HashMap<String, AliasInfo>,
+    /// 検査中の `template` 関数の型引数。注釈の解決で `T` を型引数として扱う。
+    scope_params: Vec<String>,
 }
 
 impl Checker {
@@ -101,6 +154,8 @@ impl Checker {
             probe: None,
             probe_receiver: None,
             const_names: HashSet::new(),
+            aliases: HashMap::new(),
+            scope_params: Vec::new(),
         }
     }
 
@@ -124,7 +179,7 @@ impl Checker {
             is_shape: matches!(ty, ValueType::Shape(_)),
             ..ReceiverInfo::default()
         };
-        if let ValueType::Class(name) = ty {
+        if let ValueType::Class(name, _) = ty {
             let mut seen = HashSet::new();
             let mut current = Some(name.clone());
             while let Some(class_name) = current {
@@ -162,6 +217,12 @@ impl Checker {
                 self.register_class(decl);
             }
         }
+
+        // Pass 1.5: type 宣言を登録し、型宣言と declare function の署名を検査する
+        self.scope_params.clear();
+        self.register_aliases(program);
+        self.validate_declarations(program);
+        self.validate_module_declarations();
 
         // Pass 2: validate classes
         let decls: Vec<ClassDecl> = program
@@ -222,37 +283,31 @@ impl Checker {
     fn module_env(&self) -> HashMap<String, ValueType> {
         let mut env = HashMap::new();
         for module in &self.modules {
-            let fields = module
+            let mut fields: Vec<(String, ValueType)> = module
                 .member_types
                 .iter()
                 .map(|(name, ty)| (name.clone(), self.type_from_annotation(ty)))
                 .collect();
+            for function in &module.functions {
+                let sig = self.build_sig(
+                    &function.type_params,
+                    &function.params,
+                    function.return_type.as_ref(),
+                    Some(&module.name),
+                );
+                let ty = ValueType::FunctionSig(Box::new(sig));
+                if function.is_global {
+                    env.insert(function.name.clone(), ty);
+                } else {
+                    fields.push((function.name.clone(), ty));
+                }
+            }
             env.insert(module.name.clone(), ValueType::Shape(fields));
             for (name, ty) in &module.global_types {
                 env.insert(name.clone(), self.type_from_annotation(ty));
             }
         }
         env
-    }
-
-    fn type_from_annotation(&self, ty: &TypeExpr) -> ValueType {
-        match ty {
-            TypeExpr::Optional(inner) => {
-                ValueType::Optional(Box::new(self.type_from_annotation(inner)))
-            }
-            TypeExpr::Tuple(_) => ValueType::Unknown,
-            TypeExpr::Name(name) => match name.as_str() {
-                "nil" => ValueType::Nil,
-                "boolean" => ValueType::Boolean,
-                "number" => ValueType::Number,
-                "string" => ValueType::String,
-                "table" => ValueType::Table,
-                "function" => ValueType::Function,
-                "any" | "unknown" => ValueType::Unknown,
-                _ if self.classes.contains_key(name) => ValueType::Class(name.clone()),
-                _ => ValueType::Unknown,
-            },
-        }
     }
 
     fn is_assignable(expected: &ValueType, actual: &ValueType) -> bool {
@@ -264,6 +319,29 @@ impl Checker {
                 Self::is_assignable(expected, actual)
             }
             (ValueType::Optional(inner), actual) => Self::is_assignable(inner, actual),
+            (ValueType::Generic(expected), ValueType::Generic(actual)) => expected == actual,
+            (
+                ValueType::Record {
+                    fields: expected, ..
+                },
+                ValueType::Shape(actual) | ValueType::Record { fields: actual, .. },
+            ) => Self::record_mismatch(expected, actual).is_none(),
+            (ValueType::Record { .. }, ValueType::Table)
+            | (ValueType::Table | ValueType::Shape(_), ValueType::Record { .. }) => true,
+            (
+                ValueType::Function | ValueType::FunctionSig(_),
+                ValueType::Function | ValueType::FunctionSig(_),
+            ) => true,
+            (ValueType::Class(expected, expected_args), ValueType::Class(actual, actual_args)) => {
+                expected == actual
+                    && (expected_args.is_empty()
+                        || actual_args.is_empty()
+                        || (expected_args.len() == actual_args.len()
+                            && expected_args
+                                .iter()
+                                .zip(actual_args)
+                                .all(|(e, a)| Self::is_assignable(e, a))))
+            }
             _ => expected == actual,
         }
     }
@@ -289,6 +367,7 @@ impl Checker {
                         self.const_names.remove(name);
                     }
                 }
+                self.validate_binding_types(types, values, *line);
                 for (index, name) in names.iter().enumerate() {
                     let actual = values
                         .get(index)
@@ -302,10 +381,11 @@ impl Checker {
                         if !Self::is_assignable(&expected, &actual) {
                             self.err(
                                 format!(
-                                    "cannot assign {} to '{}: {}'",
+                                    "cannot assign {} to '{}: {}'{}",
                                     actual.display(),
                                     name,
-                                    expected.display()
+                                    expected.display(),
+                                    Self::mismatch_detail(&expected, &actual)
                                 ),
                                 *line,
                             );
@@ -350,8 +430,29 @@ impl Checker {
                         }
                         Expr::Field { obj, name } => {
                             if let Expr::Ident { name: owner, .. } = obj.as_ref() {
-                                if let Some(ValueType::Shape(fields)) = env.get_mut(owner) {
-                                    Self::set_shape_field(fields, name, actual);
+                                match env.get_mut(owner) {
+                                    Some(ValueType::Shape(fields)) => {
+                                        Self::set_shape_field(fields, name, actual);
+                                    }
+                                    Some(ValueType::Record { fields, .. }) => {
+                                        let declared = fields
+                                            .iter()
+                                            .find(|(field, _)| field == name)
+                                            .map(|(_, ty)| ty.clone());
+                                        if let Some(expected) = declared {
+                                            if !Self::is_assignable(&expected, &actual) {
+                                                self.err(
+                                                    format!(
+                                                        "cannot assign {} to '{owner}.{name}: {}'",
+                                                        actual.display(),
+                                                        expected.display()
+                                                    ),
+                                                    1,
+                                                );
+                                            }
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -360,17 +461,36 @@ impl Checker {
                 }
             }
             Stmt::FunctionDecl {
-                name, params, body, ..
+                name,
+                type_params,
+                params,
+                return_type,
+                body,
+                line,
+                ..
             } => {
+                self.validate_function_decl(name, type_params, params, return_type.as_ref(), *line);
+                let saved_scope = self.scope_params.len();
+                self.scope_params.extend(type_params.iter().cloned());
+                let function_type = if type_params.is_empty() {
+                    ValueType::Function
+                } else {
+                    ValueType::FunctionSig(Box::new(self.build_sig(
+                        type_params,
+                        params,
+                        return_type.as_ref(),
+                        None,
+                    )))
+                };
                 match name.split_once('.') {
                     Some((owner, member)) if !member.contains('.') => {
                         if let Some(ValueType::Shape(fields)) = env.get_mut(owner) {
-                            Self::set_shape_field(fields, member, ValueType::Function);
+                            Self::set_shape_field(fields, member, function_type);
                         }
                     }
                     Some(_) => {}
                     None => {
-                        env.insert(name.clone(), ValueType::Function);
+                        env.insert(name.clone(), function_type);
                     }
                 }
                 let mut child = env.clone();
@@ -387,6 +507,7 @@ impl Checker {
                 for child_stmt in body {
                     self.check_stmt_types(child_stmt, &mut child);
                 }
+                self.scope_params.truncate(saved_scope);
             }
             Stmt::Do { body } | Stmt::Repeat { body, .. } => {
                 if let Stmt::Repeat { cond, .. } = stmt {
@@ -478,10 +599,26 @@ impl Checker {
             Expr::Number(_) => ValueType::Number,
             Expr::Str(_) => ValueType::String,
             Expr::Table(table_fields) => self.infer_table_shape(table_fields, env),
-            Expr::Function { .. } => ValueType::Function,
+            Expr::Function {
+                type_params,
+                params,
+                return_type,
+                ..
+            } => {
+                if type_params.is_empty() {
+                    ValueType::Function
+                } else {
+                    ValueType::FunctionSig(Box::new(self.build_sig(
+                        type_params,
+                        params,
+                        return_type.as_ref(),
+                        None,
+                    )))
+                }
+            }
             Expr::Ident { name, .. } => env.get(name).cloned().unwrap_or_else(|| {
                 if self.classes.contains_key(name) {
-                    ValueType::Class(name.clone())
+                    ValueType::Class(name.clone(), Vec::new())
                 } else {
                     ValueType::Unknown
                 }
@@ -500,27 +637,37 @@ impl Checker {
                         return ValueType::Unknown;
                     }
                 }
-                for arg in args {
-                    self.infer_expr_type(arg, env);
-                }
+                let arg_types: Vec<ValueType> = args
+                    .iter()
+                    .map(|arg| self.infer_expr_type(arg, env))
+                    .collect();
                 if let Expr::Field { obj, name } = callee.as_ref() {
                     if name == "new" {
                         if let Expr::Ident { name: class, .. } = obj.as_ref() {
                             if self.classes.contains_key(class) {
                                 // `static function new(): Part?` のように戻り値が宣言されていれば、それを使う。
                                 let declared = self.method_return_type(
-                                    &ValueType::Class(class.clone()),
+                                    &ValueType::Class(class.clone(), Vec::new()),
                                     "new",
                                 );
                                 if declared != ValueType::Unknown {
                                     return declared;
                                 }
-                                return ValueType::Class(class.clone());
+                                return ValueType::Class(class.clone(), Vec::new());
                             }
                         }
                     }
                     let obj_type = self.infer_expr_type(obj, env);
+                    if let ValueType::FunctionSig(sig) = self.member_type(&obj_type, name) {
+                        return self.check_call(&sig, name, callee, args, &arg_types);
+                    }
                     return self.method_return_type(&obj_type, name);
+                }
+                if let Expr::Ident { name, .. } = callee.as_ref() {
+                    if let Some(ValueType::FunctionSig(sig)) = env.get(name) {
+                        let sig = sig.clone();
+                        return self.check_call(&sig, name, callee, args, &arg_types);
+                    }
                 }
                 if !matches!(callee.as_ref(), Expr::Ident { .. }) {
                     // `f(x)(y)` のように、呼び出し結果を呼ぶ式の内側も検査する。
@@ -666,7 +813,7 @@ impl Checker {
             ValueType::Shape(fields) => fields
                 .iter()
                 .map(|(name, field_type)| {
-                    let kind = if *field_type == ValueType::Function {
+                    let kind = if field_type.is_function() {
                         "function"
                     } else {
                         "field"
@@ -675,7 +822,7 @@ impl Checker {
                     Self::completion_item(name, kind, text.clone(), format!("{name}: {text}"))
                 })
                 .collect(),
-            ValueType::Class(class) => self.class_items(class, class_object),
+            ValueType::Class(class, _) => self.class_items(class, class_object),
             _ => Vec::new(),
         }
     }
@@ -727,7 +874,7 @@ impl Checker {
                     {
                         continue;
                     }
-                    let text = self.describe(&self.class_member_type(&class_name, &field.field.name));
+                    let text = self.describe(&self.class_member_type(&class_name, &[], &field.field.name));
                     items.push(Self::completion_item(
                         &field.field.name,
                         "field",
@@ -760,7 +907,7 @@ impl Checker {
             let is_module = self.modules.iter().any(|module| module.name == *name);
             let (kind, detail) = if is_module {
                 ("module", format!("import type {name}"))
-            } else if *ty == ValueType::Function {
+            } else if ty.is_function() {
                 ("function", format!("function {name}"))
             } else if self.const_names.contains(name) {
                 ("constant", format!("const {name}: {text}"))
@@ -823,12 +970,71 @@ impl Checker {
                 .find(|(field, _)| field == name)
                 .map(|(_, ty)| ty.clone())
                 .unwrap_or(ValueType::Unknown),
-            ValueType::Class(class) => self.class_member_type(class, name),
+            ValueType::Record { fields, .. } => fields
+                .iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, ty)| ty.clone())
+                .unwrap_or(ValueType::Unknown),
+            ValueType::Class(class, args) => self.class_member_type(class, args, name),
             _ => ValueType::Unknown,
         }
     }
 
-    fn class_member_type(&self, class: &str, name: &str) -> ValueType {
+    /// クラスの注釈にある型引数 (`T`) を、インスタンスの型引数で置き換えるための束縛。
+    /// 継承元のメンバーは、その型引数が分からないので Unknown になる。
+    fn class_bindings(
+        &self,
+        owner: &str,
+        instance: &str,
+        args: &[ValueType],
+    ) -> HashMap<String, ValueType> {
+        let Some(info) = self.classes.get(owner) else {
+            return HashMap::new();
+        };
+        info.type_params
+            .iter()
+            .enumerate()
+            .map(|(index, param)| {
+                let bound = if owner == instance {
+                    args.get(index).cloned().unwrap_or(ValueType::Unknown)
+                } else {
+                    ValueType::Unknown
+                };
+                (param.clone(), bound)
+            })
+            .collect()
+    }
+
+    /// クラスのメンバーの注釈を、そのクラスの型引数を見える状態で解決する。
+    fn class_annotation(
+        &self,
+        ty: &TypeExpr,
+        owner: &str,
+        instance: &str,
+        args: &[ValueType],
+        method_params: &[String],
+    ) -> ValueType {
+        let mut params = self
+            .classes
+            .get(owner)
+            .map(|info| info.type_params.clone())
+            .unwrap_or_default();
+        params.extend(method_params.iter().cloned());
+        let ctx = annotation::TypeCtx {
+            params: &params,
+            module: None,
+            depth: 0,
+        };
+        let resolved = self.resolve_annotation(ty, &ctx);
+        let mut bindings = self.class_bindings(owner, instance, args);
+        // メソッド自身の型引数は呼び出しからは決まらないので Unknown にする。
+        for param in method_params {
+            bindings.insert(param.clone(), ValueType::Unknown);
+        }
+        Self::substitute(&resolved, &bindings)
+    }
+
+    fn class_member_type(&self, class: &str, args: &[ValueType], name: &str) -> ValueType {
         if self.lookup_method_in_ancestors(name, class).is_some() {
             return ValueType::Function;
         }
@@ -836,7 +1042,7 @@ impl Checker {
             return ValueType::Unknown;
         };
         if let Some(ty) = &field.field.ty {
-            return self.type_from_annotation(ty);
+            return self.class_annotation(ty, &field.class_name, class, args, &[]);
         }
         match field.field.value.as_ref() {
             Some(Expr::Number(_)) => ValueType::Number,
@@ -848,12 +1054,17 @@ impl Checker {
 
     /// `obj.name(...)` / `obj:name(...)` の戻り値型。注釈があるときだけ確定する。
     fn method_return_type(&self, obj_type: &ValueType, name: &str) -> ValueType {
-        let ValueType::Class(class) = obj_type else {
+        let ValueType::Class(class, args) = obj_type else {
             return ValueType::Unknown;
         };
-        self.lookup_method_in_ancestors(name, class)
-            .and_then(|info| info.method.return_type)
-            .map(|ty| self.type_from_annotation(&ty))
+        let Some(info) = self.lookup_method_in_ancestors(name, class) else {
+            return ValueType::Unknown;
+        };
+        info.method
+            .return_type
+            .map(|ty| {
+                self.class_annotation(&ty, &info.class_name, class, args, &info.method.type_params)
+            })
             .unwrap_or(ValueType::Unknown)
     }
 
@@ -914,7 +1125,7 @@ impl Checker {
         right: &ValueType,
         span: SourceSpan,
     ) {
-        if let ValueType::Class(class_name) = left {
+        if let ValueType::Class(class_name, _) = left {
             if let Some(info) = self.classes.get(class_name) {
                 if let Some(method) = info.methods.get(&format!("operator{op}")) {
                     if let Some(Param::Named {
@@ -941,8 +1152,8 @@ impl Checker {
         }
         let arithmetic = matches!(op, "+" | "-" | "*" | "/" | "//" | "%" | "^");
         if arithmetic
-            && *left != ValueType::Unknown
-            && *right != ValueType::Unknown
+            && !left.is_opaque()
+            && !right.is_opaque()
             && (left != &ValueType::Number || right != &ValueType::Number)
         {
             self.err_at(
@@ -955,7 +1166,7 @@ impl Checker {
                 span,
             );
         }
-        if op == ".." && *left != ValueType::Unknown && *right != ValueType::Unknown {
+        if op == ".." && !left.is_opaque() && !right.is_opaque() {
             let valid = |ty: &ValueType| matches!(ty, ValueType::String | ValueType::Number);
             if !valid(left) || !valid(right) {
                 self.err_at(
@@ -979,6 +1190,7 @@ impl Checker {
         }
         let mut info = ClassInfo {
             name: class.name.clone(),
+            type_params: class.type_params.clone(),
             is_abstract: false,
             parent_name: class.parent.clone(),
             methods: HashMap::new(),
@@ -1007,6 +1219,7 @@ impl Checker {
                         name: method.name.clone(),
                         is_operator: false,
                         operator_op: String::new(),
+                        type_params: Vec::new(),
                         is_static: method.is_static,
                         is_abstract: false,
                         is_override: false,
@@ -1033,6 +1246,7 @@ impl Checker {
         }
         let mut info = ClassInfo {
             name: decl.name.clone(),
+            type_params: decl.type_params.clone(),
             is_abstract: decl.is_abstract,
             parent_name: decl.parent.clone(),
             methods: HashMap::new(),
@@ -1107,6 +1321,7 @@ impl Checker {
             }
         }
         let members = Self::flatten_members(decl);
+        self.validate_class_annotations(decl, &members);
         let info_clone = self.classes.get(&decl.name).cloned();
         if let Some(info) = info_clone {
             for (access, member) in &members {
@@ -1333,7 +1548,7 @@ impl Checker {
                     for p in &m.params {
                         if let Param::Named {
                             name,
-                            ty: Some(TypeExpr::Name(type_name)),
+                            ty: Some(TypeExpr::Name(type_name) | TypeExpr::Generic { name: type_name, .. }),
                         } = p
                         {
                             if self.classes.contains_key(type_name) {
@@ -1406,7 +1621,7 @@ impl Checker {
                 for param in params {
                     if let Param::Named {
                         name,
-                        ty: Some(TypeExpr::Name(type_name)),
+                        ty: Some(TypeExpr::Name(type_name) | TypeExpr::Generic { name: type_name, .. }),
                     } = param
                     {
                         if self.classes.contains_key(type_name) {
@@ -1810,6 +2025,91 @@ impl Checker {
                 ),
                 line,
             );
+        }
+    }
+
+    /// `local x: Box<number>` のような型注釈の型引数の個数などを検査する。
+    fn validate_binding_types(
+        &mut self,
+        types: &[Option<TypeExpr>],
+        values: &[Expr],
+        line: usize,
+    ) {
+        let scope = self.scope_params.clone();
+        for ty in types.iter().flatten() {
+            self.validate_type_with(ty, &scope, None, false, line, "");
+        }
+        for value in values {
+            if let Expr::Function {
+                type_params,
+                params,
+                return_type,
+                ..
+            } = value
+            {
+                if !type_params.is_empty() {
+                    self.validate_signature(
+                        type_params,
+                        params,
+                        return_type.as_ref(),
+                        None,
+                        true,
+                        line,
+                        "in template function: ",
+                    );
+                }
+            }
+        }
+    }
+
+    /// 関数定義の署名。`template` つきは未定義の型名もエラーにする。
+    fn validate_function_decl(
+        &mut self,
+        name: &str,
+        type_params: &[String],
+        params: &[Param],
+        return_type: Option<&TypeExpr>,
+        line: usize,
+    ) {
+        let prefix = format!("in function '{name}': ");
+        self.validate_signature(
+            type_params,
+            params,
+            return_type,
+            None,
+            !type_params.is_empty(),
+            line,
+            &prefix,
+        );
+    }
+
+    /// クラスのフィールド・メソッドの注釈。クラス自身の型引数は見える。
+    fn validate_class_annotations(&mut self, decl: &ClassDecl, members: &[(Access, Member)]) {
+        let prefix = format!("in class '{}': ", decl.name);
+        for (_, member) in members {
+            match member {
+                Member::Field(field) => {
+                    if let Some(ty) = &field.ty {
+                        self.validate_type_with(
+                            ty,
+                            &decl.type_params,
+                            None,
+                            false,
+                            decl.line,
+                            &prefix,
+                        );
+                    }
+                }
+                Member::Method(method) => self.validate_signature(
+                    &[decl.type_params.as_slice(), method.type_params.as_slice()].concat(),
+                    &method.params,
+                    method.return_type.as_ref(),
+                    None,
+                    false,
+                    decl.line,
+                    &prefix,
+                ),
+            }
         }
     }
 

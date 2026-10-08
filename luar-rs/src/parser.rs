@@ -70,7 +70,7 @@ impl Parser {
 
     /// 現在位置の `class ... end` を1つ読む。
     pub fn parse_class(&mut self) -> Result<ClassDecl, ParseError> {
-        match self.parse_class_decl()? {
+        match self.parse_class_decl(Vec::new())? {
             Stmt::ClassDecl(decl) => Ok(decl),
             _ => unreachable!("parse_class_decl always returns a class"),
         }
@@ -166,13 +166,20 @@ impl Parser {
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
+        if self.starts_template_header() {
+            let type_params = self.parse_template_header()?;
+            return self.parse_templated_stmt(type_params);
+        }
+        if self.starts_type_alias() {
+            return self.parse_type_alias();
+        }
         if self.starts_const_declaration() {
-            return self.parse_const();
+            return self.parse_const(Vec::new());
         }
         match self.peek_kind().clone() {
-            TokenKind::Class => self.parse_class_decl(),
-            TokenKind::Local => self.parse_local(),
-            TokenKind::Function => self.parse_function_decl(),
+            TokenKind::Class => self.parse_class_decl(Vec::new()),
+            TokenKind::Local => self.parse_local(Vec::new()),
+            TokenKind::Function => self.parse_function_decl(Vec::new()),
             TokenKind::Do => self.parse_do(),
             TokenKind::While => self.parse_while(),
             TokenKind::Repeat => self.parse_repeat(),
@@ -199,7 +206,7 @@ impl Parser {
                 Ok(Stmt::Label { name, line })
             }
             TokenKind::Import => self.parse_import(),
-            TokenKind::Declare => self.parse_declare(),
+            TokenKind::Declare => self.parse_declare(Vec::new()),
             _ => self.parse_expr_or_assign(),
         }
     }
@@ -219,9 +226,29 @@ impl Parser {
         Ok(Stmt::ImportDecl { module_name })
     }
 
-    fn parse_declare(&mut self) -> Result<Stmt, ParseError> {
-        self.advance(); // declare
+    fn parse_declare(&mut self, type_params: Vec<String>) -> Result<Stmt, ParseError> {
+        let line = self.advance().line; // declare
         let is_global = self.match_tok(&TokenKind::Global);
+        if self.match_tok(&TokenKind::Function) {
+            let name = self.eat_ident()?;
+            self.eat(&TokenKind::LParen)?;
+            let params = self.parse_params()?;
+            self.eat(&TokenKind::RParen)?;
+            let return_type = self.try_parse_type_annotation()?;
+            return Ok(Stmt::DeclareFunction {
+                is_global,
+                name,
+                type_params,
+                params,
+                return_type,
+                line,
+            });
+        }
+        if !type_params.is_empty() {
+            return Err(self.error(format!(
+                "[{line}] 'template' can only be applied to 'declare function'"
+            )));
+        }
         let name = self.eat_ident()?;
         self.eat(&TokenKind::Colon)?;
         let ty = self.parse_type_expr()?;
@@ -233,7 +260,7 @@ impl Parser {
         })
     }
 
-    fn parse_const(&mut self) -> Result<Stmt, ParseError> {
+    fn parse_const(&mut self, type_params: Vec<String>) -> Result<Stmt, ParseError> {
         let line = self.advance().line;
         if self.match_tok(&TokenKind::Function) {
             let name = self.eat_ident()?;
@@ -249,11 +276,18 @@ impl Parser {
             self.eat(&TokenKind::End)?;
             return Ok(Stmt::FunctionDecl {
                 name,
+                type_params,
                 params,
                 return_type,
                 body,
                 is_const: true,
+                line,
             });
+        }
+        if !type_params.is_empty() {
+            return Err(self.error(format!(
+                "[{line}] 'template' can only be applied to a function or class declaration"
+            )));
         }
 
         let mut names = vec![self.eat_ident()?];
@@ -285,8 +319,8 @@ impl Parser {
         })
     }
 
-    fn parse_function_decl(&mut self) -> Result<Stmt, ParseError> {
-        self.eat(&TokenKind::Function)?;
+    fn parse_function_decl(&mut self, type_params: Vec<String>) -> Result<Stmt, ParseError> {
+        let line = self.eat(&TokenKind::Function)?.line;
         let mut name = self.eat_ident()?;
         while self.match_tok(&TokenKind::Dot) {
             name.push('.');
@@ -304,16 +338,18 @@ impl Parser {
         self.eat(&TokenKind::End)?;
         Ok(Stmt::FunctionDecl {
             name,
+            type_params,
             params,
             return_type,
             body,
             is_const: false,
+            line,
         })
     }
 
     // ─── Local / Assign ───────────────────────────────────────────────────────
 
-    fn parse_local(&mut self) -> Result<Stmt, ParseError> {
+    fn parse_local(&mut self, type_params: Vec<String>) -> Result<Stmt, ParseError> {
         let line = self.eat(&TokenKind::Local)?.line;
         // Lua-compatible named local function declaration.  Represent it as a
         // local binding whose value is a function expression so every later
@@ -334,12 +370,18 @@ impl Parser {
                 names: vec![name],
                 types: vec![None],
                 values: vec![Expr::Function {
+                    type_params,
                     params,
                     return_type,
                     body,
                 }],
                 line,
             });
+        }
+        if !type_params.is_empty() {
+            return Err(self.error(format!(
+                "[{line}] 'template' can only be applied to a function or class declaration"
+            )));
         }
         let mut names = vec![self.eat_ident()?];
         let mut types = vec![self.try_parse_type_annotation()?];
@@ -569,7 +611,7 @@ impl Parser {
 
     // ─── Class declaration ────────────────────────────────────────────────────
 
-    fn parse_class_decl(&mut self) -> Result<Stmt, ParseError> {
+    fn parse_class_decl(&mut self, type_params: Vec<String>) -> Result<Stmt, ParseError> {
         let line = self.peek().line;
         self.eat(&TokenKind::Class)?;
         let is_abstract = self.match_tok(&TokenKind::Abstract);
@@ -621,6 +663,7 @@ impl Parser {
 
         Ok(Stmt::ClassDecl(ClassDecl {
             name,
+            type_params,
             is_abstract: is_abstract_flag,
             parent,
             top_level_members,
@@ -647,13 +690,26 @@ impl Parser {
     }
 
     fn parse_member(&mut self) -> Result<Member, ParseError> {
+        let type_params = self.parse_optional_template_header()?;
         let is_static = self.match_tok(&TokenKind::Static);
 
         if matches!(self.peek_kind(), TokenKind::Function) {
             if matches!(self.peek_n_kind(1), TokenKind::Operator) {
+                if !type_params.is_empty() {
+                    return Err(self.error(format!(
+                        "[{}] 'template' cannot be applied to an operator method",
+                        self.peek().line
+                    )));
+                }
                 return self.parse_operator_method(is_static);
             }
-            return self.parse_method_member(is_static);
+            return self.parse_method_member(is_static, type_params);
+        }
+        if !type_params.is_empty() {
+            return Err(self.error(format!(
+                "[{}] 'template' can only be applied to a method inside a class",
+                self.peek().line
+            )));
         }
         if is_static {
             let t = self.peek();
@@ -692,7 +748,11 @@ impl Parser {
         (is_abstract, is_override, is_final)
     }
 
-    fn parse_method_member(&mut self, is_static: bool) -> Result<Member, ParseError> {
+    fn parse_method_member(
+        &mut self,
+        is_static: bool,
+        type_params: Vec<String>,
+    ) -> Result<Member, ParseError> {
         self.eat(&TokenKind::Function)?;
         let name = self.eat_ident()?;
         self.eat(&TokenKind::LParen)?;
@@ -715,6 +775,7 @@ impl Parser {
 
         Ok(Member::Method(MethodMember {
             name,
+            type_params,
             is_operator: false,
             operator_op: String::new(),
             is_static,
@@ -771,6 +832,7 @@ impl Parser {
         };
         Ok(Member::Method(MethodMember {
             name: format!("operator{op}"),
+            type_params: Vec::new(),
             is_operator: true,
             operator_op: op,
             is_static,
@@ -814,24 +876,211 @@ impl Parser {
         }
     }
 
+    /// 現在位置から型式を1つ読む。`.luard` の定義パーサーと共有する。
+    pub fn parse_type(&mut self) -> Result<TypeExpr, ParseError> {
+        self.parse_type_expr()
+    }
+
     fn parse_type_expr(&mut self) -> Result<TypeExpr, ParseError> {
-        if self.match_tok(&TokenKind::LParen) {
-            let mut types = Vec::new();
-            if !matches!(self.peek_kind(), TokenKind::RParen) {
-                types.push(self.parse_type_expr()?);
-                while self.match_tok(&TokenKind::Comma) {
-                    types.push(self.parse_type_expr()?);
+        let mut ty = match self.peek_kind() {
+            TokenKind::LParen => {
+                self.advance();
+                let types = self.parse_type_list(&TokenKind::RParen)?;
+                self.eat(&TokenKind::RParen)?;
+                if self.match_tok(&TokenKind::Arrow) {
+                    let ret = self.parse_type_expr()?;
+                    return Ok(TypeExpr::Function {
+                        params: types,
+                        ret: Box::new(ret),
+                    });
                 }
+                TypeExpr::Tuple(types)
             }
-            self.eat(&TokenKind::RParen)?;
-            return Ok(TypeExpr::Tuple(types));
-        }
-        let name = self.eat_ident()?;
-        let mut ty = TypeExpr::Name(name);
+            TokenKind::LBrace => self.parse_table_type()?,
+            _ => self.parse_named_type()?,
+        };
         if self.match_tok(&TokenKind::Question) {
             ty = TypeExpr::Optional(Box::new(ty));
         }
+        if matches!(self.peek_kind(), TokenKind::Arrow) {
+            return Err(self.error(
+                "function type parameters must be enclosed in parentheses; use `(T) -> U`"
+                    .to_string(),
+            ));
+        }
         Ok(ty)
+    }
+
+    /// `Name`、`mod.Name`、`Name<A, B>`。
+    fn parse_named_type(&mut self) -> Result<TypeExpr, ParseError> {
+        let mut name = if self.match_tok(&TokenKind::Nil) {
+            "nil".to_string()
+        } else {
+            self.eat_ident()?
+        };
+        while self.match_tok(&TokenKind::Dot) {
+            name.push('.');
+            name.push_str(&self.eat_ident()?);
+        }
+        if !self.match_tok(&TokenKind::Lt) {
+            return Ok(TypeExpr::Name(name));
+        }
+        let args = self.parse_type_list(&TokenKind::Gt)?;
+        if args.is_empty() {
+            return Err(self.error(format!("type '{name}' needs at least one type argument")));
+        }
+        self.eat_closing_angle()?;
+        Ok(TypeExpr::Generic { name, args })
+    }
+
+    /// `>` を読む。`Box<number>= x` のように `>=` として字句解析された場合は、
+    /// `>` だけを消費して `=` を残す。
+    fn eat_closing_angle(&mut self) -> Result<(), ParseError> {
+        if self.match_tok(&TokenKind::Gt) {
+            return Ok(());
+        }
+        if matches!(self.peek_kind(), TokenKind::GtEq) {
+            let token = &mut self.tokens[self.pos];
+            token.kind = TokenKind::Eq;
+            token.value = "=".to_string();
+            token.column += 1;
+            return Ok(());
+        }
+        self.eat(&TokenKind::Gt).map(|_| ())
+    }
+
+    fn parse_type_list(&mut self, close: &TokenKind) -> Result<Vec<TypeExpr>, ParseError> {
+        let mut types = Vec::new();
+        if self.peek_kind() == close {
+            return Ok(types);
+        }
+        types.push(self.parse_type_expr()?);
+        while self.match_tok(&TokenKind::Comma) {
+            types.push(self.parse_type_expr()?);
+        }
+        Ok(types)
+    }
+
+    /// `{ id: number, ref: T }`
+    fn parse_table_type(&mut self) -> Result<TypeExpr, ParseError> {
+        self.eat(&TokenKind::LBrace)?;
+        let is_record_field = matches!(self.peek_kind(), TokenKind::Ident)
+            && matches!(self.peek_n_kind(1), TokenKind::Colon);
+        if !is_record_field && !matches!(self.peek_kind(), TokenKind::RBrace) {
+            let element = self.parse_type_expr()?;
+            self.eat(&TokenKind::RBrace)?;
+            return Ok(TypeExpr::Array(Box::new(element)));
+        }
+        let mut fields: Vec<(String, TypeExpr)> = Vec::new();
+        while !matches!(self.peek_kind(), TokenKind::RBrace) {
+            let name = self.eat_ident()?;
+            if fields.iter().any(|(field, _)| *field == name) {
+                return Err(self.error(format!(
+                    "field '{name}' is declared more than once in a table type"
+                )));
+            }
+            self.eat(&TokenKind::Colon)?;
+            fields.push((name, self.parse_type_expr()?));
+            if !self.match_tok(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.eat(&TokenKind::RBrace)?;
+        Ok(TypeExpr::Table(fields))
+    }
+
+    // ─── template / type alias ────────────────────────────────────────────────
+
+    fn peek_n_value(&self, offset: usize) -> &str {
+        &self.tokens[(self.pos + offset).min(self.tokens.len() - 1)].value
+    }
+
+    fn starts_template_header(&self) -> bool {
+        self.is_contextual("template")
+            && matches!(self.peek_n_kind(1), TokenKind::Lt)
+            && matches!(self.peek_n_kind(2), TokenKind::Ident)
+    }
+
+    /// `template <…>` があれば読み、なければ空を返す。`.luard` の定義パーサーが使う。
+    pub fn parse_optional_template_header(&mut self) -> Result<Vec<String>, ParseError> {
+        if self.starts_template_header() {
+            self.parse_template_header()
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    /// `template <T, U>`。型引数名の列を返す。
+    fn parse_template_header(&mut self) -> Result<Vec<String>, ParseError> {
+        self.advance(); // contextual `template`
+        self.eat(&TokenKind::Lt)?;
+        let mut names = vec![self.eat_ident()?];
+        while self.match_tok(&TokenKind::Comma) {
+            let name = self.eat_ident()?;
+            if names.contains(&name) {
+                return Err(self.error(format!(
+                    "type parameter '{name}' is declared more than once"
+                )));
+            }
+            names.push(name);
+        }
+        self.eat_closing_angle()?;
+        Ok(names)
+    }
+
+    /// `template <T>` の直後の宣言を読む。`template` は直後の宣言1つだけに効く。
+    fn parse_templated_stmt(&mut self, type_params: Vec<String>) -> Result<Stmt, ParseError> {
+        if self.starts_type_alias() {
+            return self.parse_type_alias_with(type_params);
+        }
+        if self.starts_const_declaration() {
+            return self.parse_const(type_params);
+        }
+        match self.peek_kind() {
+            TokenKind::Function => self.parse_function_decl(type_params),
+            TokenKind::Local => self.parse_local(type_params),
+            TokenKind::Class => self.parse_class_decl(type_params),
+            TokenKind::Declare => self.parse_declare(type_params),
+            _ => {
+                let t = self.peek();
+                Err(self.error(format!(
+                    "[{}] 'template' must be followed by a type, function or class declaration",
+                    t.line
+                )))
+            }
+        }
+    }
+
+    /// `[export] type Name = ...`
+    pub fn starts_type_alias(&self) -> bool {
+        let at = usize::from(self.is_contextual("export"));
+        matches!(self.peek_n_kind(at), TokenKind::Ident)
+            && self.peek_n_value(at) == "type"
+            && matches!(self.peek_n_kind(at + 1), TokenKind::Ident)
+            && matches!(self.peek_n_kind(at + 2), TokenKind::Eq)
+    }
+
+    fn parse_type_alias(&mut self) -> Result<Stmt, ParseError> {
+        self.parse_type_alias_with(Vec::new())
+    }
+
+    pub fn parse_type_alias_with(&mut self, type_params: Vec<String>) -> Result<Stmt, ParseError> {
+        let line = self.peek().line;
+        let is_export = self.is_contextual("export");
+        if is_export {
+            self.advance(); // contextual `export`
+        }
+        self.advance(); // contextual `type`
+        let name = self.eat_ident()?;
+        self.eat(&TokenKind::Eq)?;
+        let ty = self.parse_type_expr()?;
+        Ok(Stmt::TypeAlias {
+            is_export,
+            name,
+            type_params,
+            ty,
+            line,
+        })
     }
 
     // ─── Expressions ──────────────────────────────────────────────────────────
@@ -1129,6 +1378,7 @@ impl Parser {
                 let body = self.parse_block(&[TokenKind::End])?;
                 self.eat(&TokenKind::End)?;
                 Ok(Expr::Function {
+                    type_params: Vec::new(),
                     params,
                     return_type,
                     body,

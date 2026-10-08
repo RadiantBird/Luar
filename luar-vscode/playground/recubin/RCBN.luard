@@ -1,0 +1,14 @@
+declare class Instance is
+    public is
+        Name: string
+        Parent: Instance?
+        template <T> function FindChild(Inst: Instance, name: string): T?
+        template <T> function WaitChild(Inst: Instance, name: string, timeout: number?): T?
+        template <T> function GetChildren(Inst: Instance): { T }
+        function IsA(Inst: Instance, classname: string): boolean
+        function Destroy(Inst: Instance): ()
+        template <T> function Clone(Inst: Instance): T?
+
+        static function new(classname: string): Instance?
+    end
+end

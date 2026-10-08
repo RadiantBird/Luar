@@ -1,8 +1,51 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeExpr {
+    /// `number` や `mod.MyTable` のような型名。修飾名はドット込みの1つの文字列。
     Name(String),
+    /// `MyTable<number>` のような型引数つきの型名。
+    Generic { name: String, args: Vec<TypeExpr> },
     Optional(Box<TypeExpr>),
     Tuple(Vec<TypeExpr>),
+    /// `{ id: number, ref: T }`。宣言順。
+    Table(Vec<(String, TypeExpr)>),
+    /// `{ T }`。要素の型が揃った配列。
+    Array(Box<TypeExpr>),
+    /// `(A, B) -> R`
+    Function {
+        params: Vec<TypeExpr>,
+        ret: Box<TypeExpr>,
+    },
+}
+
+impl std::fmt::Display for TypeExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TypeExpr::Name(name) => write!(f, "{name}"),
+            TypeExpr::Generic { name, args } => write!(f, "{name}<{}>", join_types(args)),
+            TypeExpr::Optional(inner) => write!(f, "{inner}?"),
+            TypeExpr::Tuple(types) => write!(f, "({})", join_types(types)),
+            TypeExpr::Table(fields) => {
+                let fields = fields
+                    .iter()
+                    .map(|(name, ty)| format!("{name}: {ty}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "{{ {fields} }}")
+            }
+            TypeExpr::Array(element) => write!(f, "{{ {element} }}"),
+            TypeExpr::Function { params, ret } => {
+                write!(f, "({}) -> {ret}", join_types(params))
+            }
+        }
+    }
+}
+
+fn join_types(types: &[TypeExpr]) -> String {
+    types
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +93,7 @@ pub enum Expr {
     },
     Table(Vec<TableField>),
     Function {
+        type_params: Vec<String>,
         params: Vec<Param>,
         return_type: Option<TypeExpr>,
         body: Vec<Stmt>,
@@ -120,10 +164,12 @@ pub enum Stmt {
     },
     FunctionDecl {
         name: String,
+        type_params: Vec<String>,
         params: Vec<Param>,
         return_type: Option<TypeExpr>,
         body: Vec<Stmt>,
         is_const: bool,
+        line: usize,
     },
     Assign {
         targets: Vec<Expr>,
@@ -180,6 +226,23 @@ pub enum Stmt {
         ty: TypeExpr,
         module_name: Option<String>,
     },
+    /// `[export] type Name<T> = ...`。実行時コードは生成しない。
+    TypeAlias {
+        is_export: bool,
+        name: String,
+        type_params: Vec<String>,
+        ty: TypeExpr,
+        line: usize,
+    },
+    /// `declare [global] function name(params): ret`(.luard専用)。
+    DeclareFunction {
+        is_global: bool,
+        name: String,
+        type_params: Vec<String>,
+        params: Vec<Param>,
+        return_type: Option<TypeExpr>,
+        line: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -191,6 +254,7 @@ pub struct IfClause {
 #[derive(Debug, Clone)]
 pub struct ClassDecl {
     pub name: String,
+    pub type_params: Vec<String>,
     pub is_abstract: bool,
     pub parent: Option<String>,
     pub top_level_members: Vec<Member>,
@@ -228,6 +292,8 @@ pub struct FieldMember {
 #[derive(Debug, Clone)]
 pub struct MethodMember {
     pub name: String,
+    /// `template <T> function ...` のメソッド自身の型引数。
+    pub type_params: Vec<String>,
     pub is_operator: bool,
     pub operator_op: String,
     pub is_static: bool,

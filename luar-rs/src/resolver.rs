@@ -186,8 +186,12 @@ impl Resolver {
                 self.error("import declarations are only allowed at the top level".to_string());
             }
             Stmt::ImportDecl { .. } => {}
-            Stmt::DeclareStmt { .. } => self
+            Stmt::DeclareStmt { .. } | Stmt::DeclareFunction { .. } => self
                 .error("'declare' is only allowed in .luard module definition files".to_string()),
+            Stmt::TypeAlias { .. } if !top_level => {
+                self.error("type declarations are only allowed at the top level".to_string());
+            }
+            Stmt::TypeAlias { .. } => {}
             Stmt::Break
             | Stmt::Continue
             | Stmt::Goto { .. }

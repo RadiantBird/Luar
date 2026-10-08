@@ -53,18 +53,7 @@ pub struct ProbeSource {
 }
 
 pub fn type_expr_text(ty: &TypeExpr) -> String {
-    match ty {
-        TypeExpr::Name(name) => name.clone(),
-        TypeExpr::Optional(inner) => format!("{}?", type_expr_text(inner)),
-        TypeExpr::Tuple(types) => format!(
-            "({})",
-            types
-                .iter()
-                .map(type_expr_text)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    }
+    ty.to_string()
 }
 
 pub fn params_text(params: &[Param]) -> String {

@@ -1,0 +1,10 @@
+import type RCBN
+
+function main()
+    local name = "Cube"
+    if cube := Instance.new(name) then
+        cube.Name = "Cat"
+    else
+        print(`failed to make the Instance: {name}!`)
+    end
+end

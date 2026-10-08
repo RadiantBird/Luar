@@ -123,6 +123,10 @@ struct Analyzer {
     class_parents: HashMap<String, String>,
     field_keys: Vec<(String, usize)>,
     top_decls: HashMap<String, usize>,
+    /// 直後の宣言だけで見える `template <T>` の型引数 (名前, 宣言token)。
+    template_params: Vec<(String, usize)>,
+    /// `template` ヘッダを読んだ時点のスコープの深さ。そこへ戻ったら宣言が終わった。
+    template_depth: usize,
 }
 
 const PRIMITIVE_TYPES: &[&str] = &[
@@ -158,6 +162,8 @@ fn run(tokens: Vec<Token>, bodyless_methods: bool) -> TokenAnalysis {
         class_parents: HashMap::new(),
         field_keys: Vec::new(),
         top_decls: HashMap::new(),
+        template_params: Vec::new(),
+        template_depth: 0,
     };
     let mut index = 0;
     while index < count {
@@ -284,11 +290,20 @@ impl Analyzer {
         } else {
             self.underflow = true;
         }
+        self.end_template_if_closed();
     }
 
     fn pop_if(&mut self, kind: FrameKind) {
         if self.top() == kind {
             self.frames.pop();
+        }
+        self.end_template_if_closed();
+    }
+
+    /// `template <T>` を付けた関数・クラスが閉じたら、型引数の見える範囲を終える。
+    fn end_template_if_closed(&mut self) {
+        if !self.template_params.is_empty() && self.frames.len() <= self.template_depth {
+            self.template_params.clear();
         }
     }
 
@@ -404,6 +419,9 @@ impl Analyzer {
         if self.kind_at(next) == TokenKind::Global {
             next += 1;
         }
+        if self.kind_at(next) == TokenKind::Function {
+            return self.declared_function(next);
+        }
         if self.kind_at(next) == TokenKind::Ident {
             let name = self.tokens[next].value.clone();
             self.declare_in(0, next, SymbolKind::Variable, false);
@@ -413,40 +431,185 @@ impl Analyzer {
         next
     }
 
+    /// `declare [global] function name(params)[: Return]`。`function` の位置から読む。
+    fn declared_function(&mut self, index: usize) -> usize {
+        let mut next = index + 1;
+        if self.kind_at(next) == TokenKind::Ident {
+            let name = self.tokens[next].value.clone();
+            self.declare_in(0, next, SymbolKind::Function, false);
+            self.top_decls.insert(name, next);
+            next += 1;
+        }
+        if self.kind_at(next) == TokenKind::LParen {
+            next += 1;
+            loop {
+                match self.kind_at(next) {
+                    TokenKind::Ident => {
+                        self.entries[next] = Entry {
+                            kind: Some(SymbolKind::Parameter),
+                            declaration: true,
+                            decl: Some(next),
+                            ..Entry::default()
+                        };
+                        next += 1;
+                        if self.kind_at(next) == TokenKind::Colon {
+                            next = self.mark_type(next + 1);
+                        }
+                    }
+                    TokenKind::DotDotDot | TokenKind::Comma => next += 1,
+                    _ => break,
+                }
+            }
+            if self.kind_at(next) == TokenKind::RParen {
+                next += 1;
+            }
+        }
+        if self.kind_at(next) == TokenKind::Colon {
+            next = self.mark_type(next + 1);
+        }
+        self.template_params.clear();
+        next
+    }
+
+    /// `template <T, U>`。型引数を、直後の宣言の中だけで見える型として宣言する。
+    fn template_header(&mut self, index: usize) -> usize {
+        self.mark(index, SymbolKind::Keyword);
+        self.template_params.clear();
+        self.template_depth = self.frames.len();
+        let mut next = index + 2;
+        while self.kind_at(next) == TokenKind::Ident {
+            let name = self.tokens[next].value.clone();
+            self.entries[next] = Entry {
+                kind: Some(SymbolKind::Type),
+                declaration: true,
+                decl: Some(next),
+                ..Entry::default()
+            };
+            self.template_params.push((name, next));
+            next += 1;
+            if self.kind_at(next) == TokenKind::Comma {
+                next += 1;
+            } else {
+                break;
+            }
+        }
+        if self.kind_at(next) == TokenKind::Gt {
+            next += 1;
+        }
+        next
+    }
+
+    /// `[export] type Name = TypeExpr`。`type` / `export` の位置から読む。
+    fn type_alias_decl(&mut self, index: usize) -> usize {
+        let mut next = index;
+        if self.is_ident_value(next, "export") {
+            self.mark(next, SymbolKind::Keyword);
+            next += 1;
+        }
+        self.mark(next, SymbolKind::Keyword);
+        next += 1;
+        self.declare_in(0, next, SymbolKind::Type, false);
+        next += 2; // 名前と `=`
+        let next = self.mark_type(next);
+        self.template_params.clear();
+        next
+    }
+
+    fn starts_type_alias(&self, index: usize) -> bool {
+        let at = if self.is_ident_value(index, "export") { index + 1 } else { index };
+        self.is_ident_value(at, "type")
+            && self.kind_at(at + 1) == TokenKind::Ident
+            && self.kind_at(at + 2) == TokenKind::Eq
+    }
+
     /// 型注釈を1つ読み、型名を色付けする。次のtoken番号を返す。
     fn mark_type(&mut self, start: usize) -> usize {
         let mut index = start;
         match self.kind_at(index) {
             TokenKind::LParen => {
-                let mut depth = 0usize;
-                while index < self.tokens.len() {
-                    match self.kind_at(index) {
-                        TokenKind::LParen => depth += 1,
-                        TokenKind::RParen => {
-                            depth -= 1;
-                            if depth == 0 {
-                                index += 1;
-                                break;
-                            }
-                        }
-                        TokenKind::Ident => self.mark_type_name(index),
-                        TokenKind::Eof => break,
-                        _ => {}
-                    }
+                index = self.mark_type_list(index + 1, TokenKind::RParen);
+                if self.kind_at(index) == TokenKind::RParen {
                     index += 1;
                 }
                 if self.kind_at(index) == TokenKind::Arrow {
-                    index = self.mark_type(index + 1);
+                    return self.mark_type(index + 1);
                 }
             }
-            TokenKind::Ident => {
-                self.mark_type_name(index);
-                index += 1;
-            }
+            TokenKind::LBrace => index = self.mark_table_type(index),
+            TokenKind::Ident => index = self.mark_named_type(index),
             TokenKind::Nil => index += 1,
             _ => return index,
         }
         if self.kind_at(index) == TokenKind::Question {
+            index += 1;
+        }
+        index
+    }
+
+    /// `close` の手前まで、カンマ区切りの型を読む。
+    fn mark_type_list(&mut self, start: usize, close: TokenKind) -> usize {
+        let mut index = start;
+        while self.kind_at(index) != close && self.kind_at(index) != TokenKind::Eof {
+            let next = self.mark_type(index);
+            if next == index {
+                break;
+            }
+            index = next;
+            if self.kind_at(index) == TokenKind::Comma {
+                index += 1;
+            } else {
+                break;
+            }
+        }
+        index
+    }
+
+    /// `Name`、`mod.Name`、`Name<A, B>`。
+    fn mark_named_type(&mut self, start: usize) -> usize {
+        let mut index = start;
+        if self.kind_at(index + 1) == TokenKind::Dot && self.kind_at(index + 2) == TokenKind::Ident {
+            // `mod.Name`: 前半はモジュール、後半が型名。
+            self.resolve(index);
+            self.entries[index + 2] = Entry {
+                kind: Some(SymbolKind::Type),
+                ..Entry::default()
+            };
+            index += 3;
+        } else {
+            self.mark_type_name(index);
+            index += 1;
+        }
+        if self.kind_at(index) == TokenKind::Lt {
+            index = self.mark_type_list(index + 1, TokenKind::Gt);
+            if self.kind_at(index) == TokenKind::Gt {
+                index += 1;
+            }
+        }
+        index
+    }
+
+    /// `{ id: number, ref: T }`
+    fn mark_table_type(&mut self, start: usize) -> usize {
+        let mut index = start + 1;
+        // `{ T }`: 配列型。
+        let is_field = self.kind_at(index) == TokenKind::Ident
+            && self.kind_at(index + 1) == TokenKind::Colon;
+        if !is_field && self.kind_at(index) != TokenKind::RBrace {
+            index = self.mark_type(index);
+        }
+        while self.kind_at(index) == TokenKind::Ident && self.kind_at(index + 1) == TokenKind::Colon {
+            self.entries[index] = Entry {
+                kind: Some(SymbolKind::Property),
+                ..Entry::default()
+            };
+            index = self.mark_type(index + 2);
+            if self.kind_at(index) == TokenKind::Comma {
+                index += 1;
+            } else {
+                break;
+            }
+        }
+        if self.kind_at(index) == TokenKind::RBrace {
             index += 1;
         }
         index
@@ -461,9 +624,19 @@ impl Analyzer {
             };
             return;
         }
-        let found = self.lookup(&name).filter(|decl| decl.kind == SymbolKind::Class);
+        if let Some((_, token)) = self.template_params.iter().rev().find(|(param, _)| *param == name) {
+            self.entries[index] = Entry {
+                kind: Some(SymbolKind::Type),
+                decl: Some(*token),
+                ..Entry::default()
+            };
+            return;
+        }
+        let found = self
+            .lookup(&name)
+            .filter(|decl| matches!(decl.kind, SymbolKind::Class | SymbolKind::Type));
         self.entries[index] = Entry {
-            kind: Some(SymbolKind::Class),
+            kind: Some(found.map_or(SymbolKind::Class, |decl| decl.kind)),
             decl: found.map(|decl| decl.token),
             unresolved: found.is_none(),
             ..Entry::default()
@@ -615,6 +788,7 @@ impl Analyzer {
         if self.bodyless_methods && owner_is_class {
             // 宣言ファイルのメソッドは `end` を持たないので、署名の直後で閉じる。
             self.frames.pop();
+            self.end_template_if_closed();
         }
         next
     }
@@ -646,6 +820,18 @@ impl Analyzer {
         let previous = self.prev_kind(index);
         let next = self.kind_at(index + 1);
 
+        // `template <T, U>`
+        if self.tokens[index].value == "template"
+            && next == TokenKind::Lt
+            && self.kind_at(index + 2) == TokenKind::Ident
+            && !matches!(previous, Some(TokenKind::Dot | TokenKind::Colon))
+        {
+            return self.template_header(index);
+        }
+        // `[export] type Name = ...`
+        if self.starts_type_alias(index) && !matches!(previous, Some(TokenKind::Dot | TokenKind::Colon)) {
+            return self.type_alias_decl(index);
+        }
         // `friend class X`
         if self.tokens[index].value == "friend"
             && next == TokenKind::Class

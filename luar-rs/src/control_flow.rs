@@ -242,6 +242,8 @@ impl Validator {
                 | Stmt::Continue
                 | Stmt::ImportDecl { .. }
                 | Stmt::DeclareStmt { .. }
+                | Stmt::TypeAlias { .. }
+                | Stmt::DeclareFunction { .. }
                 | Stmt::RawLua54(_) => {}
             }
         }
@@ -477,6 +479,8 @@ fn stmt_name(stmt: &Stmt) -> &'static str {
         Stmt::ClassDecl(_) => "class",
         Stmt::ImportDecl { .. } => "import-type",
         Stmt::DeclareStmt { .. } => "declare",
+        Stmt::TypeAlias { .. } => "type-alias",
+        Stmt::DeclareFunction { .. } => "declare-function",
         Stmt::RawLua54(_) => "raw-lua54",
     }
 }

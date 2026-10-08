@@ -1,5 +1,6 @@
 use crate::Target;
 use crate::ast::*;
+use crate::type_comment;
 use std::collections::{HashMap, HashSet};
 
 const OPERATOR_META: &[(&str, &str)] = &[
@@ -256,6 +257,13 @@ impl Codegen {
         self.out.push(String::new());
     }
 
+    /// 型注釈の元のシグネチャをコメントとして書き出す。
+    fn type_comment(&mut self, comment: Option<String>) {
+        if let Some(comment) = comment {
+            self.line(&comment);
+        }
+    }
+
     fn indented(&mut self, f: impl FnOnce(&mut Self)) {
         self.indent += 1;
         f(self);
@@ -409,9 +417,45 @@ impl Codegen {
 
     fn emit_stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::ClassDecl(d) => self.emit_class_decl(d),
-            Stmt::Local { names, values, .. } => self.emit_local(names, values),
-            Stmt::Const { names, values, .. } => {
+            Stmt::ClassDecl(d) => {
+                for comment in type_comment::class_comments(d) {
+                    self.line(&comment);
+                }
+                self.emit_class_decl(d)
+            }
+            Stmt::Local {
+                names,
+                types,
+                values,
+                ..
+            } => {
+                let comment = match values.as_slice() {
+                    [
+                        Expr::Function {
+                            type_params,
+                            params,
+                            return_type,
+                            ..
+                        },
+                    ] if names.len() == 1 => type_comment::function_comment(
+                        "local ",
+                        &names[0],
+                        type_params,
+                        params,
+                        return_type.as_ref(),
+                    ),
+                    _ => type_comment::binding_comment("local", names, types),
+                };
+                self.type_comment(comment);
+                self.emit_local(names, values)
+            }
+            Stmt::Const {
+                names,
+                types,
+                values,
+                ..
+            } => {
+                self.type_comment(type_comment::binding_comment("const", names, types));
                 let ns = names.join(", ");
                 let vs = self.emit_expr_list(values).join(", ");
                 if self.target == Target::Lua54 {
@@ -427,11 +471,20 @@ impl Codegen {
             }
             Stmt::FunctionDecl {
                 name,
+                type_params,
                 params,
+                return_type,
                 body,
                 is_const,
                 ..
             } => {
+                self.type_comment(type_comment::function_comment(
+                    if *is_const { "const " } else { "" },
+                    name,
+                    type_params,
+                    params,
+                    return_type.as_ref(),
+                ));
                 let prefix = if *is_const && self.target == Target::Luau {
                     "const "
                 } else {
@@ -600,6 +653,33 @@ impl Codegen {
             Stmt::ExprStmt(e) => {
                 let s = self.emit_expr(e);
                 self.line(&s);
+            }
+            Stmt::TypeAlias {
+                is_export,
+                name,
+                type_params,
+                ty,
+                ..
+            } => {
+                let comment = type_comment::type_alias_comment(*is_export, name, type_params, ty);
+                self.line(&comment);
+            }
+            Stmt::DeclareFunction {
+                is_global,
+                name,
+                type_params,
+                params,
+                return_type,
+                ..
+            } => {
+                let prefix = if *is_global { "declare global " } else { "declare " };
+                self.type_comment(type_comment::function_comment(
+                    prefix,
+                    name,
+                    type_params,
+                    params,
+                    return_type.as_ref(),
+                ));
             }
             Stmt::ImportDecl { .. } | Stmt::DeclareStmt { .. } => {} // handled by preamble or no output
         }
@@ -1687,6 +1767,7 @@ fn collect_stmt_names(stmt: &Stmt, names: &mut HashSet<String>) {
         Stmt::DeclareStmt { name, .. } => {
             names.insert(name.clone());
         }
+        Stmt::TypeAlias { .. } | Stmt::DeclareFunction { .. } => {}
         Stmt::Break | Stmt::Continue | Stmt::RawLua54(_) => {}
     }
 }
