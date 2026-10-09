@@ -311,11 +311,15 @@ fn generic_class_instances_with_different_arguments_do_not_mix() {
 // ─── 生成コードのコメント ────────────────────────────────────────────────────
 
 #[test]
-fn type_signatures_are_written_as_comments() {
-    let output = compile(
+fn type_signatures_are_written_as_comments_in_lua54() {
+    let output = compile_source_with_options(
         "template <T>\nexport type MyTable = { id: number, ref: T }\nlocal score: number, name = 1, \"x\"\nconst LIMIT: number = 10\ntemplate <T>\nfunction add(a: T, b: string): number\n    return 1\nend\nfunction plain(a)\n    return a\nend\n",
+        &CompileOptions {
+            target: Target::Lua54,
+            source_path: None,
+        },
     )
-    .unwrap();
+    .unwrap_or_else(|errors| panic!("{errors:?}"));
     assert!(output.contains("-- export type MyTable<T> = { id: number, ref: T }"), "{output}");
     assert!(output.contains("-- local score: number, name\nlocal score, name = 1, \"x\""), "{output}");
     assert!(output.contains("-- const LIMIT: number"), "{output}");
@@ -335,23 +339,21 @@ fn class_type_information_is_written_as_comments() {
 }
 
 #[test]
-fn comments_are_emitted_for_both_targets() {
-    for target in [Target::Luau, Target::Lua54] {
-        let options = CompileOptions {
-            target,
-            source_path: None,
-        };
-        let output = compile_source_with_options(
-            "local count: number = 1\nlocal function twice(x: number): number\n    return x * 2\nend\n",
-            &options,
-        )
-        .unwrap_or_else(|errors| panic!("{errors:?}"));
-        assert!(output.contains("-- local count: number"), "{output}");
-        assert!(
-            output.contains("-- local function twice(x: number): number"),
-            "{output}"
-        );
-    }
+fn comments_are_emitted_for_lua54() {
+    let options = CompileOptions {
+        target: Target::Lua54,
+        source_path: None,
+    };
+    let output = compile_source_with_options(
+        "local count: number = 1\nlocal function twice(x: number): number\n    return x * 2\nend\n",
+        &options,
+    )
+    .unwrap_or_else(|errors| panic!("{errors:?}"));
+    assert!(output.contains("-- local count: number"), "{output}");
+    assert!(
+        output.contains("-- local function twice(x: number): number"),
+        "{output}"
+    );
 }
 
 // ─── 色分け ────────────────────────────────────────────────────────────────

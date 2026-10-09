@@ -306,7 +306,7 @@ fn a_static_class_can_be_returned_as_the_module() {
         )
         .expect("a class is a valid module");
     assert!(output.contains("table2.add(items, 1)"), "{output}");
-    assert!(output.contains("function table2.add(items, amount)"), "{output}");
+    assert!(output.contains("function table2.add(items: { number }, amount: number)"), "{output}");
 }
 
 #[test]

@@ -348,8 +348,8 @@ print(first, second, add(3), const)
     )
     .unwrap();
 
-    assert!(output.contains("const first, second = 1, 2"));
-    assert!(output.contains("const function add(value)"));
+    assert!(output.contains("const first: number, second = 1, 2"));
+    assert!(output.contains("const function add(value: number): number"));
     assert!(output.contains("return first + value"));
     assert!(output.contains("local const = \"contextual\""));
 }
@@ -691,13 +691,9 @@ fn luard_declare_class_types_module_members() {
 #[test]
 fn luard_declare_class_emits_no_runtime_code() {
     let output = compile_with_dog_luard("local d: Dog = clsdef.dog\n").unwrap();
-    // 型注釈は元のシグネチャーのコメントとして残るが、実行コードには現れない。
-    assert!(output.contains("-- local d: Dog"), "{output}");
-    let code: Vec<&str> = output
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("--"))
-        .collect();
-    assert!(!code.join("\n").contains("Dog"), "{output}");
+    // Luau には `Dog` の宣言が無いので、型注釈は `any` に落ちて実行コードには現れない。
+    assert!(output.contains("local d: any = clsdef.dog"), "{output}");
+    assert!(!output.contains("Dog"), "{output}");
 }
 
 #[test]

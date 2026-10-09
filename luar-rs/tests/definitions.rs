@@ -109,7 +109,7 @@ fn self_in_a_source_class_is_not_a_second_parameter() {
     )
     .expect("self may be written explicitly");
     assert!(!output.contains("self, self"), "{output}");
-    assert!(output.contains("function Counter.add(self, amount)"), "{output}");
+    assert!(output.contains("function Counter.add(self, amount: number)"), "{output}");
 }
 
 #[test]

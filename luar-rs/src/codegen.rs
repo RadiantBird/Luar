@@ -1,5 +1,6 @@
 use crate::Target;
 use crate::ast::*;
+use crate::luau_types;
 use crate::type_comment;
 use std::collections::{HashMap, HashSet};
 
@@ -57,11 +58,31 @@ pub struct Codegen {
     reserved_names: HashSet<String>,
     /// 文の出力中に lowering したキャスト(`内側の式 :: 型`)。文の直前にコメントとして書く。
     pending_casts: Vec<String>,
+    /// このファイルで宣言した `type` の名前。Luau の型注釈で、そのまま参照できる。
+    declared_types: HashSet<String>,
+    /// 関数ごとの型引数。本体の中の型注釈で参照できる。`push_scope` と対で積む。
+    scope_type_params: Vec<Vec<String>>,
+    /// 直前に出力したシグネチャの型引数。次の `push_scope` で本体のスコープへ移る。
+    pending_type_params: Vec<String>,
 }
 
 struct LoweredExpr {
     prelude: Vec<String>,
     expr: String,
+}
+
+/// 関数の `<T>(a: T): R` に当たる部分。Lua 5.4 では引数名だけ。
+struct Signature {
+    generics: String,
+    params: String,
+    ret: String,
+}
+
+impl Signature {
+    /// 関数名の直後に続く文字列。
+    fn text(&self) -> String {
+        format!("{}({}){}", self.generics, self.params, self.ret)
+    }
 }
 
 impl Codegen {
@@ -83,6 +104,9 @@ impl Codegen {
             suppress_dispatch_guard: false,
             reserved_names: HashSet::new(),
             pending_casts: Vec::new(),
+            declared_types: HashSet::new(),
+            scope_type_params: Vec::new(),
+            pending_type_params: Vec::new(),
         }
     }
 
@@ -94,6 +118,16 @@ impl Codegen {
         self.reserved_names = collect_program_names(program);
         self.suppress_dispatch_guard = false;
         self.pending_casts.clear();
+        self.declared_types = program
+            .stmts
+            .iter()
+            .filter_map(|stmt| match stmt {
+                Stmt::TypeAlias { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        self.scope_type_params.clear();
+        self.pending_type_params.clear();
 
         self.emit_function_body(&program.stmts);
         self.out.join("\n")
@@ -212,9 +246,86 @@ impl Codegen {
 
     fn push_scope(&mut self) {
         self.type_env.push(HashMap::new());
+        self.scope_type_params
+            .push(std::mem::take(&mut self.pending_type_params));
     }
     fn pop_scope(&mut self) {
         self.type_env.pop();
+        self.scope_type_params.pop();
+    }
+
+    // ─── Luau type annotations ────────────────────────────────────────────────
+
+    /// 型注釈を出力コードへ書くのは Luau のときだけ。Lua 5.4 は消去してコメントに残す。
+    fn annotates(&self) -> bool {
+        self.target == Target::Luau
+    }
+
+    fn type_known(&self, name: &str, extra: &[String]) -> bool {
+        self.declared_types.contains(name)
+            || extra.iter().any(|param| param == name)
+            || self.scope_type_params.iter().flatten().any(|param| param == name)
+    }
+
+    /// Luau の型の文字列。`extra` は、その場で有効な型引数。
+    fn type_text(&self, ty: &TypeExpr, extra: &[String]) -> String {
+        luau_types::render(ty, &|name| self.type_known(name, extra))
+    }
+
+    /// `a: T, b` のような束縛の並び。Lua 5.4 では名前だけ。
+    fn binding_list(&self, names: &[String], types: &[Option<TypeExpr>]) -> String {
+        names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| match types.get(index).and_then(Option::as_ref) {
+                Some(ty) if self.annotates() => format!("{name}: {}", self.type_text(ty, &[])),
+                _ => name.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// 関数のシグネチャ。Luau では型引数、引数の型、戻り値の型を書く。
+    /// 本体のスコープでも型引数を参照できるよう、次の `push_scope` へ引き継ぐ。
+    fn signature<'a>(
+        &mut self,
+        type_params: &[String],
+        params: impl IntoIterator<Item = &'a Param>,
+        return_type: Option<&TypeExpr>,
+    ) -> Signature {
+        let params = params.into_iter().collect::<Vec<_>>();
+        if !self.annotates() {
+            return Signature {
+                generics: String::new(),
+                params: Self::emit_params_ref(&params),
+                ret: String::new(),
+            };
+        }
+        let rendered = params
+            .iter()
+            .map(|param| match param {
+                Param::Named { name, ty: Some(ty) } => {
+                    format!("{name}: {}", self.type_text(ty, type_params))
+                }
+                Param::Named { name, ty: None } => name.clone(),
+                Param::Vararg => "...".to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ret = return_type
+            .map(|ty| format!(": {}", self.type_text(ty, type_params)))
+            .unwrap_or_default();
+        let generics = if type_params.is_empty() {
+            String::new()
+        } else {
+            format!("<{}>", type_params.join(", "))
+        };
+        self.pending_type_params = type_params.to_vec();
+        Signature {
+            generics,
+            params: rendered,
+            ret,
+        }
     }
     fn set_type(&mut self, name: &str, class: &str) {
         if let Some(top) = self.type_env.last_mut() {
@@ -261,8 +372,11 @@ impl Codegen {
         self.out.push(String::new());
     }
 
-    /// 型注釈の元のシグネチャをコメントとして書き出す。
+    /// 型注釈の元のシグネチャをコメントとして書き出す。Luau では注釈そのものを出すので書かない。
     fn type_comment(&mut self, comment: Option<String>) {
+        if self.annotates() {
+            return;
+        }
         if let Some(comment) = comment {
             self.line(&comment);
         }
@@ -465,7 +579,7 @@ impl Codegen {
                     _ => type_comment::binding_comment("local", names, types),
                 };
                 self.type_comment(comment);
-                self.emit_local(names, values)
+                self.emit_local(names, types, values)
             }
             Stmt::Const {
                 names,
@@ -474,7 +588,7 @@ impl Codegen {
                 ..
             } => {
                 self.type_comment(type_comment::binding_comment("const", names, types));
-                let ns = names.join(", ");
+                let ns = self.binding_list(names, types);
                 let vs = self.emit_expr_list(values).join(", ");
                 if self.target == Target::Lua54 {
                     let attributed = names
@@ -508,8 +622,8 @@ impl Codegen {
                 } else {
                     ""
                 };
-                let ps = Self::emit_params_vec(params);
-                self.line(&format!("{prefix}function {name}({ps})"));
+                let sig = self.signature(type_params, params, return_type.as_ref());
+                self.line(&format!("{prefix}function {name}{}", sig.text()));
                 self.indented(|s| {
                     s.push_scope();
                     s.emit_function_body(body);
@@ -679,8 +793,20 @@ impl Codegen {
                 ty,
                 ..
             } => {
-                let comment = type_comment::type_alias_comment(*is_export, name, type_params, ty);
-                self.line(&comment);
+                if self.annotates() {
+                    let export = if *is_export { "export " } else { "" };
+                    let generics = if type_params.is_empty() {
+                        String::new()
+                    } else {
+                        format!("<{}>", type_params.join(", "))
+                    };
+                    let body = self.type_text(ty, type_params);
+                    self.line(&format!("{export}type {name}{generics} = {body}"));
+                } else {
+                    let comment =
+                        type_comment::type_alias_comment(*is_export, name, type_params, ty);
+                    self.line(&comment);
+                }
             }
             Stmt::DeclareFunction {
                 is_global,
@@ -691,13 +817,17 @@ impl Codegen {
                 ..
             } => {
                 let prefix = if *is_global { "declare global " } else { "declare " };
-                self.type_comment(type_comment::function_comment(
+                // 宣言だけで実体が無いので、Luau でも元のシグネチャをコメントで残す。
+                let comment = type_comment::function_comment(
                     prefix,
                     name,
                     type_params,
                     params,
                     return_type.as_ref(),
-                ));
+                );
+                if let Some(comment) = comment {
+                    self.line(&comment);
+                }
             }
             Stmt::ImportDecl { .. } | Stmt::DeclareStmt { .. } => {} // handled by preamble or no output
         }
@@ -768,13 +898,18 @@ impl Codegen {
         self.line("end");
     }
 
-    fn emit_local(&mut self, names: &[String], values: &[Expr]) {
+    fn emit_local(&mut self, names: &[String], types: &[Option<TypeExpr>], values: &[Expr]) {
         if names.len() == 1
             && values.len() == 1
-            && let Expr::Function { params, body, .. } = &values[0]
+            && let Expr::Function {
+                type_params,
+                params,
+                return_type,
+                body,
+            } = &values[0]
         {
-            let parameters = Self::emit_params_vec(params);
-            self.line(&format!("local function {}({parameters})", names[0]));
+            let sig = self.signature(type_params, params, return_type.as_ref());
+            self.line(&format!("local function {}{}", names[0], sig.text()));
             self.indented(|this| {
                 this.push_scope();
                 this.emit_function_body(body);
@@ -783,7 +918,7 @@ impl Codegen {
             self.line("end");
             return;
         }
-        let ns = names.join(", ");
+        let ns = self.binding_list(names, types);
         if values.is_empty() {
             self.line(&format!("local {ns}"));
         } else {
@@ -873,12 +1008,18 @@ impl Codegen {
             let all_params: Vec<_> = std::iter::once(&self_param)
                 .chain(m.params.iter())
                 .collect();
-            let ps = Self::emit_params_ref(&all_params);
+            let sig = self.signature(
+                &m.type_params,
+                all_params.iter().copied(),
+                m.return_type.as_ref(),
+            );
             self.blank();
-            self.line(&format!("{name}.{meta} = function({ps})"));
+            self.line(&format!("{name}.{meta} = function{}", sig.text()));
             self.indented(|s| {
                 if let Some(body) = &m.body {
+                    s.push_scope();
                     s.emit_function_body(body);
+                    s.pop_scope();
                 }
             });
             self.line("end");
@@ -891,8 +1032,8 @@ impl Codegen {
             }
             self.blank();
             if m.name == "new" {
-                let ps = Self::emit_params_vec(&m.params);
-                self.line(&format!("local function new({ps})"));
+                let sig = self.signature(&m.type_params, m.params.iter(), None);
+                self.line(&format!("local function new{}", sig.text()));
                 self.indented(|s| {
                     s.line(&format!("local self = setmetatable({{}}, {name})"));
                     for (_, f) in &fields {
@@ -911,19 +1052,17 @@ impl Codegen {
                     s.line("return self");
                 });
             } else {
-                let ps = if m.is_static {
-                    Self::emit_params_vec(&m.params)
-                } else {
-                    let self_param = Param::Named {
-                        name: "self".into(),
-                        ty: None,
-                    };
-                    let all_params: Vec<_> = std::iter::once(&self_param)
-                        .chain(m.params.iter())
-                        .collect();
-                    Self::emit_params_ref(&all_params)
+                let self_param = Param::Named {
+                    name: "self".into(),
+                    ty: None,
                 };
-                self.line(&format!("local function {}({ps})", m.name));
+                let leading = (!m.is_static).then_some(&self_param);
+                let sig = self.signature(
+                    &m.type_params,
+                    leading.into_iter().chain(m.params.iter()),
+                    m.return_type.as_ref(),
+                );
+                self.line(&format!("local function {}{}", m.name, sig.text()));
                 self.indented(|s| {
                     if let Some(body) = &m.body {
                         s.push_scope();
@@ -951,9 +1090,9 @@ impl Codegen {
             }
         }
         if let Some((_, m)) = ctor {
-            let ps = Self::emit_params_vec(&m.params);
+            let sig = self.signature(&m.type_params, m.params.iter(), None);
             self.blank();
-            self.line(&format!("function {name}.new({ps})"));
+            self.line(&format!("function {name}.new{}", sig.text()));
             self.indented(|s| {
                 s.line(&format!("local self = setmetatable({{}}, {name})"));
                 for (_, f) in &fields {
@@ -976,9 +1115,9 @@ impl Codegen {
 
         // static methods
         for (_, m) in others.iter().filter(|(_, m)| m.is_static) {
-            let ps = Self::emit_params_vec(&m.params);
+            let sig = self.signature(&m.type_params, m.params.iter(), m.return_type.as_ref());
             self.blank();
-            self.line(&format!("function {name}.{}({ps})", m.name));
+            self.line(&format!("function {name}.{}{}", m.name, sig.text()));
             self.indented(|s| {
                 if let Some(body) = &m.body {
                     s.push_scope();
@@ -1001,9 +1140,13 @@ impl Codegen {
             let all_params: Vec<_> = std::iter::once(&self_param)
                 .chain(m.params.iter())
                 .collect();
-            let ps = Self::emit_params_ref(&all_params);
+            let sig = self.signature(
+                &m.type_params,
+                all_params.iter().copied(),
+                m.return_type.as_ref(),
+            );
             self.blank();
-            self.line(&format!("function {name}.{}({ps})", m.name));
+            self.line(&format!("function {name}.{}{}", m.name, sig.text()));
             self.indented(|s| {
                 if let Some(body) = &m.body {
                     s.push_scope();
@@ -1023,9 +1166,13 @@ impl Codegen {
             let all_params: Vec<_> = std::iter::once(&self_param)
                 .chain(m.params.iter())
                 .collect();
-            let ps = Self::emit_params_ref(&all_params);
+            let sig = self.signature(
+                &m.type_params,
+                all_params.iter().copied(),
+                m.return_type.as_ref(),
+            );
             self.blank();
-            self.line(&format!("function {name}.free({ps})"));
+            self.line(&format!("function {name}.free{}", sig.text()));
             self.indented(|s| {
                 if let Some(body) = &m.body {
                     s.push_scope();
@@ -1415,6 +1562,11 @@ impl Codegen {
                 } else {
                     format!("({})", values[0])
                 };
+                if self.annotates() {
+                    // Luau は `::` をそのまま解釈する。直後の `<` を型引数と読まないよう括弧で束ねる。
+                    let expr = format!("({rendered} :: {})", self.type_text(ty, &[]));
+                    return LoweredExpr { prelude, expr };
+                }
                 let cast = format!("{rendered} :: {ty}");
                 if !self.pending_casts.contains(&cast) {
                     self.pending_casts.push(cast);
@@ -1482,7 +1634,13 @@ impl Codegen {
                     expr: format!("{{ {} }}", parts.join(", ")),
                 }
             }
-            Expr::Function { params, body, .. } => {
+            Expr::Function {
+                type_params,
+                params,
+                return_type,
+                body,
+            } => {
+                let sig = self.signature(type_params, params, return_type.as_ref());
                 // inline function: capture output at current indent
                 let saved = std::mem::take(&mut self.out);
                 self.indent += 1;
@@ -1492,11 +1650,11 @@ impl Codegen {
                 let body_lines = std::mem::replace(&mut self.out, saved);
                 self.indent -= 1;
                 let body_str = body_lines.join("\n");
-                let ps = Self::emit_params_vec(params);
                 LoweredExpr {
                     prelude: Vec::new(),
                     expr: format!(
-                        "function({ps})\n{body_str}\n{}end",
+                        "function{}\n{body_str}\n{}end",
+                        sig.text(),
                         "    ".repeat(self.indent)
                     ),
                 }

@@ -5,6 +5,7 @@ pub mod completion;
 pub mod control_flow;
 pub mod include;
 pub mod lexer;
+pub mod luau_types;
 pub mod method_calls;
 pub mod modules;
 pub mod navigation;
@@ -412,7 +413,6 @@ fn prepare_analysis(source: &str, options: &CompileOptions) -> Result<Prepared, 
     })
 }
 
-/// `import type name` の行番号(1始まり)。見つからなければ1。
 /// ソース中の `import type` 1つ分。位置は名前のもの(0始まり)。
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportInfo {
@@ -473,6 +473,7 @@ pub fn list_imports(source: &str, options: &CompileOptions) -> Vec<ImportInfo> {
     imports
 }
 
+/// `import type name` の行番号(1始まり)。見つからなければ1。
 fn import_line(source: &str, name: &str) -> usize {
     source
         .lines()

@@ -83,7 +83,7 @@ Lua.panic()
     assert!(output.contains("local Lua = {}"));
     assert!(output.contains("local function explode(self)"));
     assert!(output.contains("explode(self)"));
-    assert!(output.contains("Lua.__eq = function(self, other)"));
+    assert!(output.contains("Lua.__eq = function(self, other: any)"));
     assert!(output.contains("value:greet()"));
     assert!(output.contains("value:free()"));
     assert!(output.contains("Lua.panic()"));
@@ -110,7 +110,7 @@ local secret = Secret.create(42)
     )
     .expect("private constructor should be callable inside its owner");
 
-    assert!(output.contains("local function new(value)"));
+    assert!(output.contains("local function new(value: number)"));
     assert!(output.contains("return new(value)"));
     assert!(!output.contains("function Secret.new"));
 }

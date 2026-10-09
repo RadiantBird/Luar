@@ -89,9 +89,9 @@ fn operators_on_unions_are_not_rejected() {
 }
 
 #[test]
-fn union_types_are_written_in_comments() {
+fn union_types_are_written_as_luau_annotations() {
     let output = compile("local a: number | string = 1\n").unwrap();
-    assert!(output.contains("-- local a: number | string"), "{output}");
+    assert!(output.contains("local a: number | string = 1"), "{output}");
 }
 
 #[test]

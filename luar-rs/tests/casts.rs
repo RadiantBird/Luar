@@ -107,10 +107,9 @@ end
 #[test]
 fn cast_binds_tighter_than_binary_operators() {
     let output = compile("local a = 1\nlocal b = 2\nlocal c = a + b :: number\n").unwrap();
-    assert!(output.contains("-- cast: b :: number\nlocal c = a + b"), "{output}");
+    assert!(output.contains("local c = a + (b :: number)"), "{output}");
     let output = compile("local a = 1\nlocal b = 2\nlocal c = (a + b) :: number * 2\n").unwrap();
-    assert!(output.contains("-- cast: (a + b) :: number"), "{output}");
-    assert!(output.contains("local c = (a + b) * 2"), "{output}");
+    assert!(output.contains("local c = ((a + b) :: number) * 2"), "{output}");
     compile("local x = 1\nlocal y = -x :: number\n").expect("unary minus applies to the cast");
 }
 
@@ -121,18 +120,29 @@ fn cast_type_errors_in_the_target_are_reported() {
 }
 
 #[test]
-fn casts_are_erased_and_commented_before_their_statement() {
-    for target in [Target::Luau, Target::Lua54] {
-        let output = compile_for(
-            target,
-            "local a = \"2\"\nlocal b = tonumber(a) :: number\nif (b :: number) > 1 then\n    print(b :: number)\nend\n",
-        )
-        .unwrap();
-        assert!(!output.contains("local b = tonumber(a) ::"), "{output}");
-        assert!(output.contains("-- cast: tonumber(a) :: number\nlocal b = tonumber(a)"), "{output}");
-        assert!(output.contains("-- cast: b :: number\nif b > 1 then"), "{output}");
-        assert!(output.contains("    -- cast: b :: number\n    print(b)"), "{output}");
-    }
+fn casts_are_erased_and_commented_before_their_statement_in_lua54() {
+    let output = compile_for(
+        Target::Lua54,
+        "local a = \"2\"\nlocal b = tonumber(a) :: number\nif (b :: number) > 1 then\n    print(b :: number)\nend\n",
+    )
+    .unwrap();
+    assert!(!output.contains("local b = tonumber(a) ::"), "{output}");
+    assert!(output.contains("-- cast: tonumber(a) :: number\nlocal b = tonumber(a)"), "{output}");
+    assert!(output.contains("-- cast: b :: number\nif b > 1 then"), "{output}");
+    assert!(output.contains("    -- cast: b :: number\n    print(b)"), "{output}");
+}
+
+#[test]
+fn casts_are_kept_as_luau_casts() {
+    let output = compile_for(
+        Target::Luau,
+        "local a = \"2\"\nlocal b = tonumber(a) :: number\nif (b :: number) < 1 then\n    print(b :: number)\nend\n",
+    )
+    .unwrap();
+    assert!(output.contains("local b = (tonumber(a) :: number)"), "{output}");
+    assert!(output.contains("if (b :: number) < 1 then"), "{output}");
+    assert!(output.contains("print((b :: number))"), "{output}");
+    assert!(!output.contains("-- cast"), "{output}");
 }
 
 #[test]

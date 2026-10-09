@@ -133,15 +133,25 @@ m.add(1, "a") -- error: type parameter 'T' was inferred as number but argument 2
 
 呼び出しの型検査は、`declare function`と`template`つきの関数だけが対象である。`template`のない通常の`function f(a: number)`の呼び出しは従来どおり検査しない。型の宣言内で未定義の型名(`template`を書き忘れた`T`など)はエラーになるが、通常の`local x: Foo`の未知の型名は従来どおりエラーにしない。
 
-型は生成コードでは消去されるが、元の宣言を直前の1行コメントとして書き出す(Luau/Lua 5.4共通)。コンパイラの不具合調査用である。
+Luauへのコンパイルでは、型注釈をLuauの型構文のまま出力する。LuauのAnalyzeが引数や戻り値の型を推論できるようになり、`--!native`を使う場合は型に応じた最適化も効く(通常の実行速度は変わらない)。Lua 5.4へのコンパイルでは型を消去し、元の宣言を直前の1行コメントとして書き出す。
 
 ```lua
+-- Luau
+export type MyTable<T> = { id: number, ref: T }
+local score: number, name = 0, "x"
+function first<T>(a: T, b: T): T ... end
+
+-- Lua 5.4
 -- export type MyTable<T> = { id: number, ref: T }
 -- local score: number, name
 local score, name = 0, "x"
 -- function first<T>(a: T, b: T): T
 function first(a, b) ... end
 ```
+
+- 出力コードの中に宣言が無い型名(クラス、`import type`したモジュールの型、`declare class`の型)は`any`に置き換える。`Dog?`は`any?`、`{ Dog }`は`{ any }`になる。
+- クラスのメソッドも引数と戻り値の型を出力する(`self`は無注釈)。クラス自体の型引数(`template <T> class Box`)は`any`になる。
+- `local f: (number) -> number = function(x) ... end`のように関数式を代入するときは、`local function f`へ変換するため`f`の型注釈は出力されない(引数と戻り値の注釈は残る)。
 
 ### ユニオン型(`A | B`)
 
@@ -180,7 +190,7 @@ local s = 1 :: string             -- error: cannot cast number to string
 - 二項演算子より強く、単項演算子より弱く結び付く。`a + b :: number`は`a + (b :: number)`、`(a + b) :: number`は括弧で束ねた式へのキャストである。
 - `::name::`はラベルなので、`::`の後に識別子と`::`が続く並びはキャストにならない。キャストの連鎖は括弧で書く(`(x :: any) :: number`)。
 - 型の側の`<`はジェネリクスとして読まれる。`a :: number < 3`ではなく`(a :: number) < 3`と書く。
-- 生成コードではキャストを消去し、その文の直前に`-- cast: tonumber(a) :: number`というコメントを付ける。
+- Luauへのコンパイルでは、キャストを括弧で束ねた`(tonumber(a) :: number)`として出力する。Lua 5.4へのコンパイルでは、キャストを消去し、その文の直前に`-- cast: tonumber(a) :: number`というコメントを付ける。
 
 ### 型の推論と標準ライブラリ
 
