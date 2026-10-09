@@ -453,6 +453,7 @@ impl Checker {
                 types,
                 values,
                 line,
+                ..
             } => {
                 for name in names {
                     if matches!(stmt, Stmt::Const { .. }) {
@@ -492,6 +493,11 @@ impl Checker {
                         // .luard が宣言した型を Unknown で潰さない。
                     } else {
                         env.insert(name.clone(), actual);
+                    }
+                }
+                if matches!(stmt, Stmt::Const { is_using: true, .. }) {
+                    if let Some(bound) = names.first().and_then(|name| env.get(name)).cloned() {
+                        self.check_using_binding(&names[0], &bound, *line);
                     }
                 }
             }
@@ -1499,6 +1505,51 @@ impl Checker {
             }
             visited.insert(cur.clone());
             current = self.classes.get(&cur).and_then(|i| i.parent_name.clone());
+        }
+    }
+
+    /// クラス自身か祖先が、インスタンスメソッド `free` を持つか。
+    fn class_has_free(&self, class_name: &str) -> bool {
+        let mut visited = HashSet::new();
+        let mut current = Some(class_name.to_string());
+        while let Some(name) = current {
+            if !visited.insert(name.clone()) {
+                return false;
+            }
+            let Some(info) = self.classes.get(&name) else {
+                return false;
+            };
+            if info.methods.get("free").is_some_and(|m| !m.method.is_static) {
+                return true;
+            }
+            current = info.parent_name.clone();
+        }
+        false
+    }
+
+    /// `using name = expr` の値は、`free` を持つクラスのインスタンス(`Class?` も可)でなければならない。
+    fn check_using_binding(&mut self, name: &str, ty: &ValueType, line: usize) {
+        let class = match ty {
+            ValueType::Class(class, _) => Some(class),
+            ValueType::Optional(inner) => match inner.as_ref() {
+                ValueType::Class(class, _) => Some(class),
+                _ => None,
+            },
+            _ => None,
+        };
+        match class {
+            Some(class) if self.class_has_free(class) => {}
+            Some(class) => self.err(
+                format!("'using {name}' requires a class with a 'free' method; class '{class}' has none"),
+                line,
+            ),
+            None => self.err(
+                format!(
+                    "'using {name}' requires an instance of a class with a 'free' method, got {}",
+                    ty.display()
+                ),
+                line,
+            ),
         }
     }
 

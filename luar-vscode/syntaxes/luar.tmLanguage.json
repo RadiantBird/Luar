@@ -11,6 +11,7 @@
     { "include": "#include-macro" },
     { "include": "#type-annotation" },
     { "include": "#const-decl" },
+    { "include": "#using-decl" },
     { "include": "#import-decl" },
     { "include": "#type-alias" },
     { "include": "#template-header" },
@@ -69,6 +70,13 @@
       "match": "(^[ \\t]*|[;\\n][ \\t]*)(const)\\b",
       "captures": {
         "2": { "name": "storage.modifier.const.luar" }
+      }
+    },
+    "using-decl": {
+      "comment": "using name = expr: free() is called when the scope ends",
+      "match": "(^[ \\t]*|[;\\n][ \\t]*)(using)\\b(?=[ \\t]+[A-Za-z_][A-Za-z0-9_]*[ \\t]*[=:][^=:])",
+      "captures": {
+        "2": { "name": "storage.modifier.using.luar" }
       }
     },
     "include-macro": {

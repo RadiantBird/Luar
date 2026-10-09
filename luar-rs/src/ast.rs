@@ -186,6 +186,8 @@ pub enum Stmt {
         types: Vec<Option<TypeExpr>>,
         values: Vec<Expr>,
         line: usize,
+        /// `using name = expr`。`const` と同じ束縛で、スコープを抜けるとき `free()` を呼ぶ。
+        is_using: bool,
     },
     FunctionDecl {
         name: String,

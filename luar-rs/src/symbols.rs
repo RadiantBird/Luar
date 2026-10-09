@@ -980,6 +980,15 @@ impl Analyzer {
             self.mark_type_name(index + 2);
             return index + 3;
         }
+        // `using NAME =` / `using NAME:`
+        if self.tokens[index].value == "using"
+            && next == TokenKind::Ident
+            && matches!(self.kind_at(index + 2), TokenKind::Eq | TokenKind::Colon)
+            && !matches!(previous, Some(TokenKind::Dot | TokenKind::Colon))
+        {
+            self.mark(index, SymbolKind::Keyword);
+            return self.declare_names(index + 1, SymbolKind::Variable, true);
+        }
         // `const NAME` / `const function`
         if self.tokens[index].value == "const"
             && matches!(next, TokenKind::Ident | TokenKind::Function)

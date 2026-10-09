@@ -1,0 +1,18 @@
+class Sigma is
+    public is
+        jaw = 'cool'
+
+        static function new()
+            print('wassup')
+        end
+
+        function free()
+            print('byebye')
+        end
+    end
+end
+
+function main()
+    using s = Sigma.new()
+end
+main()

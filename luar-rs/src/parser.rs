@@ -154,6 +154,13 @@ impl Parser {
             && matches!(self.peek_n_kind(1), TokenKind::Function | TokenKind::Ident)
     }
 
+    /// `using name =` / `using name:`。`using` は変数名としても使えるので、続きの形で判別する。
+    fn starts_using_declaration(&self) -> bool {
+        self.is_contextual("using")
+            && matches!(self.peek_n_kind(1), TokenKind::Ident)
+            && matches!(self.peek_n_kind(2), TokenKind::Eq | TokenKind::Colon)
+    }
+
     pub fn parse(&mut self) -> Result<Program, ParseError> {
         let stmts = self.parse_block(&[TokenKind::Eof])?;
         Ok(Program { stmts })
@@ -180,6 +187,9 @@ impl Parser {
         }
         if self.starts_const_declaration() {
             return self.parse_const(Vec::new());
+        }
+        if self.starts_using_declaration() {
+            return self.parse_using();
         }
         match self.peek_kind().clone() {
             TokenKind::Class => self.parse_class_decl(Vec::new()),
@@ -332,6 +342,32 @@ impl Parser {
             types,
             values,
             line,
+            is_using: false,
+        })
+    }
+
+    /// `using name [: Type] = expr`。束縛は1つだけで、初期化式が必須。
+    fn parse_using(&mut self) -> Result<Stmt, ParseError> {
+        let line = self.advance().line; // contextual `using`
+        let name = self.eat_ident()?;
+        let ty = self.try_parse_type_annotation()?;
+        if !self.match_tok(&TokenKind::Eq) {
+            return Err(self.error(format!(
+                "[{line}] using declaration must have an initializer"
+            )));
+        }
+        let value = self.parse_expr()?;
+        if self.peek_kind() == &TokenKind::Comma {
+            return Err(self.error(format!(
+                "[{line}] using declaration binds exactly one value"
+            )));
+        }
+        Ok(Stmt::Const {
+            names: vec![name],
+            types: vec![ty],
+            values: vec![value],
+            line,
+            is_using: true,
         })
     }
 

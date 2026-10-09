@@ -252,7 +252,7 @@ const KEYWORDS = [
   "class", "is", "public", "private", "static", "abstract", "override", "final", "super",
   "operator", "import", "declare", "global", "function", "end", "local", "return", "self",
   "if", "then", "else", "elseif", "while", "for", "do", "repeat", "until", "in", "break",
-  "continue", "goto", "and", "or", "not", "true", "false", "nil", "const",
+  "continue", "goto", "and", "or", "not", "true", "false", "nil", "const", "using",
 ];
 
 export function indexDocument(source: string, moduleDefinitions: ModuleDefinition[] = []): DocumentIndex {

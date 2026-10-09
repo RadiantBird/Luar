@@ -64,7 +64,25 @@ pub struct Codegen {
     scope_type_params: Vec<Vec<String>>,
     /// 直前に出力したシグネチャの型引数。次の `push_scope` で本体のスコープへ移る。
     pending_type_params: Vec<String>,
+    /// 外側から順に、いま出力中の `using` スコープ(Luau)。関数の境界でいったん空にする。
+    using_scopes: Vec<UsingScope>,
+    /// 出力中の式が `...` を使ったか。`using` の本体を包むクロージャへ `...` を渡すかの判断に使う。
+    vararg_used: bool,
 }
+
+/// `using` 以降を包んだクロージャ。中の return/break/continue は、クロージャの外へ中継する。
+struct UsingScope {
+    /// スコープに入った時点のループの深さ。これと同じ深さの `break`/`continue` だけが外へ抜ける。
+    loops_at_entry: usize,
+    used_return: bool,
+    used_break: bool,
+    used_continue: bool,
+}
+
+/// クロージャの戻り値の先頭に付けて、どの制御で抜けたかを伝える印。
+const EXIT_RETURN: u8 = 1;
+const EXIT_BREAK: u8 = 2;
+const EXIT_CONTINUE: u8 = 3;
 
 struct LoweredExpr {
     prelude: Vec<String>,
@@ -107,6 +125,8 @@ impl Codegen {
             declared_types: HashSet::new(),
             scope_type_params: Vec::new(),
             pending_type_params: Vec::new(),
+            using_scopes: Vec::new(),
+            vararg_used: false,
         }
     }
 
@@ -128,6 +148,8 @@ impl Codegen {
             .collect();
         self.scope_type_params.clear();
         self.pending_type_params.clear();
+        self.using_scopes.clear();
+        self.vararg_used = false;
 
         self.emit_function_body(&program.stmts);
         self.out.join("\n")
@@ -421,10 +443,17 @@ impl Codegen {
     }
 
     fn emit_function_body(&mut self, body: &[Stmt]) {
+        // 関数の境界では、外側の `using` スコープの return/break を持ち込まない。
+        let outer_scopes = std::mem::take(&mut self.using_scopes);
+        let outer_vararg = std::mem::replace(&mut self.vararg_used, false);
+        self.emit_function_statements(body);
+        self.using_scopes = outer_scopes;
+        self.vararg_used = outer_vararg;
+    }
+
+    fn emit_function_statements(&mut self, body: &[Stmt]) {
         if self.target != Target::Luau || !contains_goto(body) {
-            for stmt in body {
-                self.emit_stmt(stmt);
-            }
+            self.emit_block(body, false);
             return;
         }
 
@@ -484,6 +513,107 @@ impl Codegen {
         self.line("end");
     }
 
+    /// 文の並びを出力する。Luau では `using` 以降を `pcall` のクロージャで包み、
+    /// 抜けるときに `free()` を呼ぶ。`guard` はゴトーのディスパッチャ用の脱出判定を各文の後ろに足す。
+    fn emit_block(&mut self, statements: &[Stmt], guard: bool) {
+        for (index, stmt) in statements.iter().enumerate() {
+            if self.target == Target::Luau
+                && let Stmt::Const {
+                    is_using: true,
+                    names,
+                    ..
+                } = stmt
+            {
+                self.emit_stmt(stmt);
+                self.emit_using_scope(&names[0], &statements[index + 1..]);
+                return;
+            }
+            self.emit_stmt(stmt);
+            if guard {
+                self.emit_dispatch_guard();
+            }
+        }
+    }
+
+    /// `using name` の後ろの文 `rest` を `pcall` で包み、`name:free()` を必ず呼ぶ。
+    /// 中の `return`/`break`/`continue` は、クロージャの戻り値で外へ中継する。
+    fn emit_using_scope(&mut self, name: &str, rest: &[Stmt]) {
+        let result = self.generated_name("using");
+        let outer_out = std::mem::take(&mut self.out);
+        let outer_vararg = std::mem::replace(&mut self.vararg_used, false);
+        self.using_scopes.push(UsingScope {
+            loops_at_entry: self.continue_wrappers.len(),
+            used_return: false,
+            used_break: false,
+            used_continue: false,
+        });
+        self.indented(|this| this.emit_block(rest, false));
+        let scope = self.using_scopes.pop().expect("using scope");
+        let body = std::mem::replace(&mut self.out, outer_out);
+        let uses_vararg = std::mem::replace(&mut self.vararg_used, outer_vararg);
+        self.vararg_used |= uses_vararg;
+
+        let (params, args) = if uses_vararg { ("...", ", ...") } else { ("", "") };
+        self.line(&format!(
+            "local {result} = table.pack(pcall(function({params})"
+        ));
+        self.out.extend(body);
+        self.line(&format!("end{args}))"));
+        self.line(&format!("if {name} ~= nil then {name}:free() end"));
+        self.line(&format!("if not {result}[1] then error({result}[2], 0) end"));
+        if scope.used_return {
+            self.line(&format!("if {result}[2] == {EXIT_RETURN} then"));
+            self.indented(|this| {
+                this.emit_return_line(&format!("table.unpack({result}, 3, {result}.n)"));
+            });
+            self.line("end");
+        }
+        if scope.used_break {
+            self.line(&format!("if {result}[2] == {EXIT_BREAK} then"));
+            self.indented(|this| this.emit_stmt(&Stmt::Break));
+            self.line("end");
+        }
+        if scope.used_continue {
+            self.line(&format!("if {result}[2] == {EXIT_CONTINUE} then"));
+            self.indented(|this| this.emit_stmt(&Stmt::Continue));
+            self.line("end");
+        }
+    }
+
+    /// `return` を出力する。`using` のクロージャの中なら、先頭に印を付けて外へ中継する。
+    fn emit_return_line(&mut self, values: &str) {
+        let line = match self.using_scopes.last_mut() {
+            Some(scope) => {
+                scope.used_return = true;
+                if values.is_empty() {
+                    format!("return {EXIT_RETURN}")
+                } else {
+                    format!("return {EXIT_RETURN}, {values}")
+                }
+            }
+            None if values.is_empty() => "return".to_string(),
+            None => format!("return {values}"),
+        };
+        self.line(&line);
+    }
+
+    /// 現在の `using` クロージャの外へ抜ける `break`/`continue` なら、印を返して `true`。
+    fn emit_using_exit(&mut self, code: u8) -> bool {
+        let depth = self.continue_wrappers.len();
+        match self.using_scopes.last_mut() {
+            Some(scope) if scope.loops_at_entry == depth => {
+                if code == EXIT_BREAK {
+                    scope.used_break = true;
+                } else {
+                    scope.used_continue = true;
+                }
+                self.line(&format!("return {code}"));
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn emit_dispatch_guard(&mut self) {
         if self.suppress_dispatch_guard {
             self.suppress_dispatch_guard = false;
@@ -506,20 +636,14 @@ impl Codegen {
             self.line("repeat");
             self.indented(|this| {
                 this.continue_wrappers.push(Some(break_flag.clone()));
-                for stmt in body {
-                    this.emit_stmt(stmt);
-                    this.emit_dispatch_guard();
-                }
+                this.emit_block(body, true);
                 this.continue_wrappers.pop();
             });
             self.line("until true");
             self.line(&format!("if {break_flag} then break end"));
         } else {
             self.continue_wrappers.push(None);
-            for stmt in body {
-                self.emit_stmt(stmt);
-                self.emit_dispatch_guard();
-            }
+            self.emit_block(body, true);
             self.continue_wrappers.pop();
         }
     }
@@ -585,15 +709,18 @@ impl Codegen {
                 names,
                 types,
                 values,
+                is_using,
                 ..
             } => {
-                self.type_comment(type_comment::binding_comment("const", names, types));
+                let keyword = if *is_using { "using" } else { "const" };
+                self.type_comment(type_comment::binding_comment(keyword, names, types));
                 let ns = self.binding_list(names, types);
                 let vs = self.emit_expr_list(values).join(", ");
                 if self.target == Target::Lua54 {
+                    let attribute = if *is_using { "close" } else { "const" };
                     let attributed = names
                         .iter()
-                        .map(|name| format!("{name} <const>"))
+                        .map(|name| format!("{name} <{attribute}>"))
                         .collect::<Vec<_>>()
                         .join(", ");
                     self.line(&format!("local {attributed} = {vs}"));
@@ -638,12 +765,7 @@ impl Codegen {
             }
             Stmt::Do { body } => {
                 self.line("do");
-                self.indented(|s| {
-                    for st in body {
-                        s.emit_stmt(st);
-                        s.emit_dispatch_guard();
-                    }
-                });
+                self.indented(|s| s.emit_block(body, true));
                 self.line("end");
             }
             Stmt::While { cond, body } => {
@@ -695,21 +817,11 @@ impl Codegen {
                         let kw = if i == 0 { "if" } else { "elseif" };
                         let c = self.emit_expr(&clause.cond);
                         self.line(&format!("{kw} {c} then"));
-                        self.indented(|s| {
-                            for st in &clause.body {
-                                s.emit_stmt(st);
-                                s.emit_dispatch_guard();
-                            }
-                        });
+                        self.indented(|s| s.emit_block(&clause.body, true));
                     }
                     if let Some(eb) = else_body {
                         self.line("else");
-                        self.indented(|s| {
-                            for st in eb {
-                                s.emit_stmt(st);
-                                s.emit_dispatch_guard();
-                            }
-                        });
+                        self.indented(|s| s.emit_block(eb, true));
                     }
                     self.line("end");
                 }
@@ -739,14 +851,13 @@ impl Codegen {
                 self.line("end");
             }
             Stmt::Return(vals) => {
-                if vals.is_empty() {
-                    self.line("return");
-                } else {
-                    let vs = self.emit_expr_list(vals).join(", ");
-                    self.line(&format!("return {vs}"));
-                }
+                let vs = self.emit_expr_list(vals).join(", ");
+                self.emit_return_line(&vs);
             }
             Stmt::Break => {
+                if self.emit_using_exit(EXIT_BREAK) {
+                    return;
+                }
                 if let Some(Some(flag)) = self.continue_wrappers.last() {
                     let flag = flag.clone();
                     self.line(&format!("{flag} = true"));
@@ -754,6 +865,9 @@ impl Codegen {
                 self.line("break");
             }
             Stmt::Continue => {
+                if self.emit_using_exit(EXIT_CONTINUE) {
+                    return;
+                }
                 if self.target == Target::Luau {
                     self.line("continue");
                 } else if self.continue_wrappers.last().is_some_and(Option::is_some) {
@@ -846,12 +960,7 @@ impl Codegen {
                 let value = this.emit_expr(value);
                 this.line(&format!("local {name} = {value}"));
                 this.line(&format!("if {name} then"));
-                this.indented(|this| {
-                    for statement in &clause.body {
-                        this.emit_stmt(statement);
-                        this.emit_dispatch_guard();
-                    }
-                });
+                this.indented(|this| this.emit_block(&clause.body, true));
                 if index + 1 < clauses.len() {
                     this.line("else");
                     this.indented(|this| {
@@ -859,12 +968,7 @@ impl Codegen {
                     });
                 } else if let Some(body) = else_body {
                     this.line("else");
-                    this.indented(|this| {
-                        for statement in body {
-                            this.emit_stmt(statement);
-                            this.emit_dispatch_guard();
-                        }
-                    });
+                    this.indented(|this| this.emit_block(body, true));
                 }
                 this.line("end");
             });
@@ -877,23 +981,13 @@ impl Codegen {
             "if {} then",
             parenthesize_if_expr(&clause.cond, &condition.expr)
         ));
-        self.indented(|this| {
-            for statement in &clause.body {
-                this.emit_stmt(statement);
-                this.emit_dispatch_guard();
-            }
-        });
+        self.indented(|this| this.emit_block(&clause.body, true));
         if index + 1 < clauses.len() {
             self.line("else");
             self.indented(|this| this.emit_if_statement_chain(clauses, else_body, index + 1));
         } else if let Some(body) = else_body {
             self.line("else");
-            self.indented(|this| {
-                for statement in body {
-                    this.emit_stmt(statement);
-                    this.emit_dispatch_guard();
-                }
-            });
+            self.indented(|this| this.emit_block(body, true));
         }
         self.line("end");
     }
@@ -1171,16 +1265,40 @@ impl Codegen {
                 all_params.iter().copied(),
                 m.return_type.as_ref(),
             );
+            // 解放済みなら何もしない `free` が公開の入口。本体は `__free` に置き、
+            // 親クラスの `free` の本体を、子の後に自動で呼ぶ。
+            let parent_has_free = decl
+                .parent
+                .as_deref()
+                .is_some_and(|parent| self.lookup_method(parent, "free").is_some());
             self.blank();
-            self.line(&format!("function {name}.free{}", sig.text()));
+            self.line(&format!("function {name}.__free{}", sig.text()));
             self.indented(|s| {
                 if let Some(body) = &m.body {
                     s.push_scope();
                     s.emit_function_body(body);
                     s.pop_scope();
                 }
+                if parent_has_free {
+                    let parent = decl.parent.as_deref().unwrap_or_default();
+                    s.line(&format!("{parent}.__free(self)"));
+                }
             });
             self.line("end");
+            self.blank();
+            self.line(&format!("function {name}.free(self)"));
+            self.indented(|s| {
+                s.line("if rawget(self, \"__freed\") then return end");
+                s.line("self.__freed = true");
+                s.line(&format!("{name}.__free(self)"));
+            });
+            self.line("end");
+        }
+
+        // `using` の脱出で `<close>` が呼ぶ。メタメソッドは継承されないので、クラスごとに置く。
+        if self.target == Target::Lua54 && self.lookup_method(name, "free").is_some() {
+            self.blank();
+            self.line(&format!("{name}.__close = function(self) self:free() end"));
         }
 
         self.current_class = prev;
@@ -1413,10 +1531,13 @@ impl Codegen {
                 expr: format!("\"{}\"", Self::escape_string(v)),
             },
             Expr::InterpolatedString(parts) => self.lower_interpolated(parts),
-            Expr::Vararg => LoweredExpr {
-                prelude: Vec::new(),
-                expr: "...".to_string(),
-            },
+            Expr::Vararg => {
+                self.vararg_used = true;
+                LoweredExpr {
+                    prelude: Vec::new(),
+                    expr: "...".to_string(),
+                }
+            }
             Expr::Ident { name: n, .. } => LoweredExpr {
                 prelude: Vec::new(),
                 expr: n.clone(),

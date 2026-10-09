@@ -50,6 +50,9 @@ struct Validator {
     labels: HashMap<String, LabelSite>,
     gotos: Vec<JumpSite>,
     next_local: usize,
+    /// この関数で最初の `using` と最初の `goto`/ラベルの行。両方あるとエラーにする。
+    using_line: Option<usize>,
+    jump_line: Option<usize>,
 }
 
 impl Validator {
@@ -59,6 +62,8 @@ impl Validator {
             labels: HashMap::new(),
             gotos: Vec::new(),
             next_local: 0,
+            using_line: None,
+            jump_line: None,
         }
     }
 
@@ -97,6 +102,15 @@ impl Validator {
             }
         }
         self.labels.clear();
+
+        if let (Some(using_line), Some(jump_line)) = (self.using_line, self.jump_line) {
+            self.errors.push(FlowError {
+                line: jump_line,
+                message: format!(
+                    "goto and labels cannot be used in a function that has 'using' (line {using_line})"
+                ),
+            });
+        }
     }
 
     fn nested_function(&mut self, body: &[Stmt], params: &[Param]) {
@@ -109,6 +123,14 @@ impl Validator {
         for stmt in body {
             match stmt {
                 Stmt::Local { names, values, .. } | Stmt::Const { names, values, .. } => {
+                    if let Stmt::Const {
+                        is_using: true,
+                        line,
+                        ..
+                    } = stmt
+                    {
+                        self.using_line.get_or_insert(*line);
+                    }
                     for value in values {
                         self.walk_expr(value);
                     }
@@ -134,6 +156,23 @@ impl Validator {
                     self.walk_block(body, &mut child, loop_depth + 1);
                 }
                 Stmt::Repeat { body, cond } => {
+                    let using_in_body = body
+                        .iter()
+                        .find_map(|stmt| match stmt {
+                            Stmt::Const {
+                                is_using: true,
+                                line,
+                                ..
+                            } => Some(*line),
+                            _ => None,
+                        });
+                    if let Some(line) = using_in_body {
+                        self.errors.push(FlowError {
+                            line,
+                            message: "'using' cannot be declared directly in a repeat-until body"
+                                .to_string(),
+                        });
+                    }
                     let mut child = locals.clone();
                     self.walk_block(body, &mut child, loop_depth + 1);
                     self.walk_expr(cond);
@@ -193,12 +232,16 @@ impl Validator {
                     line: 1,
                     message: "continue is only allowed inside a loop".to_string(),
                 }),
-                Stmt::Goto { label, line } => self.gotos.push(JumpSite {
-                    name: label.clone(),
-                    line: *line,
-                    locals: locals.clone(),
-                }),
+                Stmt::Goto { label, line } => {
+                    self.jump_line.get_or_insert(*line);
+                    self.gotos.push(JumpSite {
+                        name: label.clone(),
+                        line: *line,
+                        locals: locals.clone(),
+                    })
+                }
                 Stmt::Label { name, line } => {
+                    self.jump_line.get_or_insert(*line);
                     if let Some(previous) = self.labels.get(name) {
                         self.errors.push(FlowError {
                             line: *line,
@@ -298,6 +341,27 @@ impl Validator {
                     self.walk_expr(&clause.branch.result);
                 }
                 let mut locals = HashSet::new();
+                for branch in if_expr
+                    .clauses
+                    .iter()
+                    .map(|clause| &clause.branch)
+                    .chain(std::iter::once(&if_expr.else_branch))
+                {
+                    for stmt in &branch.statements {
+                        if let Stmt::Const {
+                            is_using: true,
+                            line,
+                            ..
+                        } = stmt
+                        {
+                            self.errors.push(FlowError {
+                                line: *line,
+                                message: "'using' cannot be declared inside an if expression"
+                                    .to_string(),
+                            });
+                        }
+                    }
+                }
                 self.walk_block(&if_expr.else_branch.statements, &mut locals, 0);
                 self.walk_expr(&if_expr.else_branch.result);
             }

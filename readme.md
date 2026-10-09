@@ -424,9 +424,15 @@ function Lua.greet(self)
     print(`Hello from {self.Year}!`)
 end
 
-function Lua.free(self)
+function Lua.__free(self)
     print("Goodbye world")
     -- クリーンアップ処理（ユーザー定義）
+end
+
+function Lua.free(self)
+    if rawget(self, "__freed") then return end -- 2回目以降は何もしない
+    self.__freed = true
+    Lua.__free(self)
 end
 
 -- ========================
@@ -448,6 +454,26 @@ Lua.panic()
 
 L:free()
 ```
+
+### スコープを抜けるときの自動解放(`using`)
+`using`で宣言した変数は、スコープを抜けるとき`free()`が自動で呼ばれる。イベントの切断のような「必ず後始末したい」処理に使う。`local`は今までどおり何もしない。
+
+```luau
+using conn = Signal.new() -- このブロックを抜けるとき conn.free() が呼ばれる
+conn.connect(handler)
+if failed then
+    return -- returnでも、break/continueでも、error()でも呼ばれる
+end
+```
+
+- `using 名前 [: 型] = 式`の形で、束縛は1つ、初期化式は必須。`const`と同じで再代入はできない。`using`は変数名にも使える(`using x =`の形のときだけ宣言になる)。
+- 値は`free`を持つクラス(祖先の`free`でもよい)のインスタンスでなければコンパイルエラー。`Class?`のときは、nilなら何もしない。
+- 複数あるときは宣言の逆順に解放する。`return`の値は、解放の前に評価する。
+- `free()`は何度呼んでも1回しか実行しない。明示的に`free()`を呼んだ変数が、スコープを抜けるときにもう一度実行されることはない。
+- 継承したクラスでは、子の`free`のあとに親の`free`が自動で呼ばれる(`super.free()`は書かなくてよい)。
+- 制約: `using`のある関数では`goto`とラベルは使えない。`repeat ... until`の本体の直下、if式の中には書けない。
+
+Luauへのコンパイルでは、`using`以降の文を`pcall`で包み、抜けたあとで`free()`を呼ぶ。`return`/`break`/`continue`は包んだ関数の戻り値で外へ中継するので、スコープごとにクロージャが1つ増える。Lua 5.4へのコンパイルでは`local conn <close> = ...`になり、各クラスに`__close`メタメソッドを出力する。
 
 ### 継承
 ```Luau
