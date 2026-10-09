@@ -691,12 +691,36 @@ mod.run()
 print(mod.hogehoge)
 ```
 
-`!include`は`local`または`const`の単一行宣言でのみ使用できる。パスはinclude元からの相対`.luar`または`.lua`パスであり、循環include、ファイル欠落、末尾の`return <identifier>`不在はコンパイルエラーになる。
+includeされるファイルは、末尾の`return <名前>`で、モジュールとして渡すものを決める。テーブルだけでなく、`class`の名前も返せる。`static`メソッドだけのクラスは、名前空間のように使える。
+
+```lua
+-- table2.luar
+class table2 is
+    public is
+        static function add(items: {number}, amount: number)
+            -- ...
+        end
+    end
+end
+
+return table2
+```
+
+末尾の`return`が無いときのエラーには、ファイルで最後に宣言されたクラス(なければ`local`/`const`/`function`)の名前を使った`return`の例が付く。
+
+`!include`は`local`または`const`の単一行宣言でのみ使用できる。パスはinclude元からの相対`.luar`または`.lua`パスで、`..`やサブディレクトリを含められる(絶対パスは使えない)。includeされたファイルの中の`!include`は、そのファイルからの相対パスである。循環include、ファイル欠落、末尾の`return <identifier>`不在はコンパイルエラーになる。
 
 `.lua`はLua 5.4 parserで構文を検証してから、Lua 5.4 targetでは元の本文を保持してinline展開する。Lua 5.4の`<close>`や整数・ビット演算など、Luauで意味を保持できない機能をLuauへ出力しようとした場合は、近似変換せず互換性エラーにする。対象runtimeの標準ライブラリ差まではLuarが補完しない。
 
 ### 定義ファイル
-`import type qaz`と書いた`.luar`ファイルと同じディレクトリに、`qaz.luard`を配置する。
+`import type qaz`と書いた`.luar`ファイルと同じディレクトリに、`qaz.luard`を配置する。別のディレクトリの定義ファイルを使うときは、`from`でパスを書く。
+
+```lua
+import type love from "../defs/love.luard"
+print(love.timer.getTime())
+```
+
+パスは`import type`を書いたファイルからの相対パスで、`..`とサブディレクトリをいくつでも含められる。拡張子は`.luard`だけで、絶対パスは使えない(`!include`と同じ規則)。`love`は修飾名で、ファイル名とは無関係に付けられる。エディタは、このパスの解決をコンパイラ(`luar imports`)に問い合わせる。
 
 ```luau
 -- main.luar
@@ -788,7 +812,7 @@ declare bar: number
 ```
 
 ### 仕様
-- `.luard`は`import type`元と同じディレクトリだけから探索する。
+- `import type name`は、`import type`元と同じディレクトリの`name.luard`を読む。別の場所は`import type name from "相対パス.luard"`で指す。
 - importしたmoduleの非global宣言に一致する、ソース内で束縛されていない未修飾名は
   `[module名].[フィールド名]`へ変換する。
 - local、const、関数引数、ループ変数、関数名、クラス名はmodule宣言より優先される。

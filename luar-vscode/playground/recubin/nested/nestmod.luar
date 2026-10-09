@@ -1,0 +1,7 @@
+const table2 = !include("../table2.luar")
+
+local t = {1, 2, 3, 4}
+table2.add(t, 2)
+table2.print(t)
+table2.sub(t, 4)
+table2.print(t)

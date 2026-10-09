@@ -216,8 +216,13 @@ export function parseModuleDefinition(moduleName: string, source: string, filePa
   return { definition, errors };
 }
 
+/** `import type name`(パスなし)が指す、同じディレクトリの `name.luard` を読む。 */
 export function loadModuleDefinition(moduleName: string, sourcePath: string): ModuleDefinitionResult {
-  const filePath = path.join(path.dirname(sourcePath), `${moduleName}.luard`);
+  return loadModuleDefinitionFromFile(moduleName, path.join(path.dirname(sourcePath), `${moduleName}.luard`));
+}
+
+/** 解決済みのパスの `.luard` を読む。パスの規則(`from "..."` の相対パスなど)はコンパイラが決める。 */
+export function loadModuleDefinitionFromFile(moduleName: string, filePath: string): ModuleDefinitionResult {
   try {
     return parseModuleDefinition(moduleName, fs.readFileSync(filePath, "utf8"), filePath);
   } catch (error) {

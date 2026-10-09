@@ -1,8 +1,8 @@
 use luar_rs::completion::CompletionReport;
 use luar_rs::navigation::{self, DefinitionReport, TokenReport};
 use luar_rs::{
-    CompileOptions, Diagnostic, DiagnosticReport, Target, analyze_source_with_options,
-    complete_source_with_options, compile_source_with_options, dump_ir,
+    CompileOptions, Diagnostic, DiagnosticReport, ImportReport, Target, analyze_source_with_options,
+    complete_source_with_options, compile_source_with_options, dump_ir, list_imports,
 };
 use std::env;
 use std::fs;
@@ -22,6 +22,7 @@ Usage:
   luar complete [--target luau|lua54] --stdin --source-path <path> --offset <utf16-offset>
   luar tokens [--target luau|lua54] --stdin --source-path <path>
   luar definition [--target luau|lua54] --stdin --source-path <path> --offset <utf16-offset>
+  luar imports [--target luau|lua54] --stdin --source-path <path>
   luar help
 
 The default target is luau. Output extensions do not select a target.";
@@ -34,6 +35,7 @@ enum Command {
     Complete,
     Tokens,
     Definition,
+    Imports,
 }
 
 struct Cli {
@@ -112,6 +114,10 @@ fn run() -> Result<(), ()> {
             let tokens = navigation::semantic_tokens(&source, &options);
             write_json(&TokenReport { tokens })?;
         }
+        Command::Imports => {
+            let imports = list_imports(&source, &options);
+            write_json(&ImportReport { imports })?;
+        }
         Command::Definition => {
             let offset = cli.offset.expect("validated offset");
             let locations = navigation::definition(&source, offset, &options);
@@ -139,6 +145,7 @@ fn parse_cli(arguments: &[String]) -> Result<Cli, String> {
         "complete" => Command::Complete,
         "tokens" => Command::Tokens,
         "definition" => Command::Definition,
+        "imports" => Command::Imports,
         command => return Err(format!("unknown command '{command}'")),
     };
     let mut target = Target::Luau;
@@ -193,7 +200,7 @@ fn parse_cli(arguments: &[String]) -> Result<Cli, String> {
     }
 
     let needs_offset = matches!(command, Command::Complete | Command::Definition);
-    if needs_offset || command == Command::Tokens {
+    if needs_offset || matches!(command, Command::Tokens | Command::Imports) {
         if !stdin || (needs_offset && offset.is_none()) {
             let needed = if needs_offset {
                 "--stdin, --source-path and --offset"

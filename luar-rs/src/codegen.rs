@@ -1807,7 +1807,7 @@ fn collect_stmt_names(stmt: &Stmt, names: &mut HashSet<String>) {
                 }
             }
         }
-        Stmt::ImportDecl { module_name } => {
+        Stmt::ImportDecl { module_name, .. } => {
             names.insert(module_name.clone());
         }
         Stmt::DeclareStmt { name, .. } => {

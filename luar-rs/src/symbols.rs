@@ -520,6 +520,11 @@ impl Analyzer {
         if self.is_ident_value(index + 1, "type") && self.kind_at(index + 2) == TokenKind::Ident {
             self.mark(index + 1, SymbolKind::Keyword);
             self.declare_in(0, index + 2, SymbolKind::Namespace, false);
+            // `import type Name from "path"`
+            if self.is_ident_value(index + 3, "from") && self.kind_at(index + 4) == TokenKind::LuaString {
+                self.mark(index + 3, SymbolKind::Keyword);
+                return index + 5;
+            }
             return index + 3;
         }
         index + 1

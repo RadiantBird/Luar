@@ -452,16 +452,17 @@ fn remove_terminal_return(source: &str, source_path: &Path) -> Result<(String, S
             last_code = Some(index);
         }
     }
+    let hint = return_hint(&lines);
     let Some(return_index) = last_code else {
         return Err(format!(
-            "{}:1: included source must end with standalone `return <identifier>`",
+            "{}:1: included source must end with standalone `return <identifier>`{hint}",
             source_path.display()
         ));
     };
     let return_line = lines[return_index];
     let Some(returned_name) = parse_terminal_return(return_line) else {
         return Err(format!(
-            "{}:{}: included source must end with standalone `return <identifier>`",
+            "{}:{}: included source must end with standalone `return <identifier>`{hint}",
             source_path.display(),
             return_index + 1
         ));
@@ -470,6 +471,59 @@ fn remove_terminal_return(source: &str, source_path: &Path) -> Result<(String, S
     // numbers for the include source map.
     lines[return_index] = "";
     Ok((lines.join("\n"), returned_name.to_string()))
+}
+
+/// 末尾に書くべき `return` のヒント。トップレベルで最後に宣言されたクラス名を優先し、
+/// なければ最後の `local` / `const` / `function` の名前を示す。見つからなければ空。
+fn return_hint(lines: &[&str]) -> String {
+    let mut last_class = None;
+    let mut last_other = None;
+    for line in lines {
+        // トップレベルの宣言だけを数える(インデントされた行は入れ子の中)。
+        if line.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let mut words = line.split_whitespace();
+        let first = words.next();
+        let name_of = |word: Option<&str>| {
+            let word = word?;
+            let end = word
+                .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+                .unwrap_or(word.len());
+            let name = &word[..end];
+            (!name.is_empty() && !name.starts_with(|character: char| character.is_ascii_digit()))
+                .then(|| name.to_string())
+        };
+        match first {
+            Some("class") => {
+                let mut next = words.next();
+                if next == Some("abstract") {
+                    next = words.next();
+                }
+                last_class = name_of(next).or(last_class);
+            }
+            Some("local") => {
+                let mut next = words.next();
+                if next == Some("function") {
+                    next = words.next();
+                }
+                last_other = name_of(next).or(last_other);
+            }
+            Some("const") => last_other = name_of(words.next()).or(last_other),
+            Some("function") => {
+                if let Some(word) = words.next() {
+                    if !word.contains(['.', ':']) {
+                        last_other = name_of(Some(word)).or(last_other);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    match last_class.or(last_other) {
+        Some(name) => format!("; add `return {name}` at the end of the file"),
+        None => String::new(),
+    }
 }
 
 fn parse_terminal_return(line: &str) -> Option<&str> {

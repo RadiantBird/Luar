@@ -169,6 +169,28 @@ impl View {
         find(false).or_else(|| find(true))
     }
 
+    /// カーソルが `import type Name from "path"` のパス文字列の上にあれば、解決した `.luard` のパス。
+    fn import_path_at(&self, line: usize, column: usize, source_path: &Path) -> Option<PathBuf> {
+        let tokens = &self.analysis.tokens;
+        let index = tokens.iter().position(|token| {
+            token.kind == TokenKind::LuaString
+                && token.line == token.end_line
+                && token.column - 1 <= column
+                && column < token.end_column - 1
+                && self.origin(token).is_some_and(|origin| {
+                    origin.file == self.main_file && origin.line == line + 1
+                })
+        })?;
+        if index < 4 || tokens[index - 4].kind != TokenKind::Import || tokens[index - 3].value != "type" {
+            return None;
+        }
+        let (path_index, path) = import_from_path(tokens, index - 2)?;
+        if path_index != index {
+            return None;
+        }
+        modules::resolve_definition_path(&tokens[index - 2].value, Some(&path), source_path).ok()
+    }
+
     /// 宣言が `local name = !include(...)` の行(展開後は別名の行)にあるか。
     fn declared_on_include_line(&self, declaration: usize) -> bool {
         self.origin(&self.analysis.tokens[declaration])
@@ -318,26 +340,37 @@ impl DefinitionFile {
     }
 }
 
-fn imported_modules(view: &View) -> Vec<String> {
+/// `import type name [from "path"]` の (名前, パス指定)。
+fn imported_modules(view: &View) -> Vec<(String, Option<String>)> {
     let tokens = &view.analysis.tokens;
-    let mut names = Vec::new();
+    let mut modules = Vec::new();
     for index in 0..tokens.len().saturating_sub(2) {
         if tokens[index].kind == TokenKind::Import
             && tokens[index + 1].kind == TokenKind::Ident
             && tokens[index + 1].value == "type"
             && tokens[index + 2].kind == TokenKind::Ident
         {
-            names.push(tokens[index + 2].value.clone());
+            let path = import_from_path(tokens, index + 2).map(|(_, path)| path);
+            modules.push((tokens[index + 2].value.clone(), path));
         }
     }
-    names
+    modules
+}
+
+/// 名前 `name_index` の `import type Name from "path"` の、パス文字列トークンの番号と中身。
+fn import_from_path(tokens: &[Token], name_index: usize) -> Option<(usize, String)> {
+    let from = tokens.get(name_index + 1)?;
+    let path = tokens.get(name_index + 2)?;
+    (from.kind == TokenKind::Ident && from.value == "from" && path.kind == TokenKind::LuaString)
+        .then(|| (name_index + 2, path.value.clone()))
 }
 
 fn definition_files(view: &View, source_path: &Path) -> Vec<DefinitionFile> {
     imported_modules(view)
         .into_iter()
-        .filter_map(|module| {
-            let path = modules::definition_path(&module, source_path);
+        .filter_map(|(module, import_path)| {
+            let path =
+                modules::resolve_definition_path(&module, import_path.as_deref(), source_path).ok()?;
             let text = std::fs::read_to_string(&path).ok()?;
             let analysis = symbols::analyze_definition(lex(&text)?);
             Some(DefinitionFile {
@@ -387,6 +420,10 @@ pub fn definition(source: &str, utf16_offset: usize, options: &CompileOptions) -
     let Some(view) = build_view(source, options) else {
         return Vec::new();
     };
+    // `import type Name from "path"` のパス文字列は、その `.luard` を開く。
+    if let Some(path) = view.import_path_at(line, column, source_path) {
+        return vec![file_start(&path)];
+    }
     let Some(index) = view.token_at(line, column) else {
         // include宣言行の束縛名は、include先のファイルを開く。
         return view

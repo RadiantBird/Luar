@@ -70,6 +70,52 @@ pub fn definition_path(module_name: &str, source_path: &Path) -> std::path::Path
     directory.join(format!("{module_name}.luard"))
 }
 
+/// `import type name [from "path"]` が指す `.luard` のパス。
+/// `path` がなければ、書いたファイルと同じディレクトリの `name.luard`。
+/// あれば書いたファイルからの相対パス(`..` とサブディレクトリを含められる)で、`.luard` だけを受け付ける。
+pub fn resolve_definition_path(
+    module_name: &str,
+    import_path: Option<&str>,
+    source_path: &Path,
+) -> Result<std::path::PathBuf, String> {
+    let Some(requested) = import_path else {
+        return Ok(definition_path(module_name, source_path));
+    };
+    if Path::new(requested).is_absolute() || requested.starts_with(['/', '\\']) {
+        return Err("import type paths must be relative to the importing source file".to_string());
+    }
+    let extension = Path::new(requested)
+        .extension()
+        .and_then(|extension| extension.to_str());
+    if extension != Some("luard") {
+        return Err("import type only accepts .luard files".to_string());
+    }
+    let directory = source_path.parent().unwrap_or_else(|| Path::new(""));
+    Ok(normalize_path(&directory.join(requested)))
+}
+
+/// `.` と `..` を字面で畳む(ファイルの有無は見ない)。
+fn normalize_path(path: &Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let popped = matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                ) && normalized.pop();
+                if !popped {
+                    normalized.push("..");
+                }
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
 pub fn load_definition(
     module_name: &str,
     source_path: &Path,
@@ -97,7 +143,14 @@ pub fn load_definition_lossy(
     module_name: &str,
     source_path: &Path,
 ) -> (Option<ModuleDefinition>, Vec<ModuleError>) {
-    let definition_path = definition_path(module_name, source_path);
+    load_definition_file_lossy(module_name, &definition_path(module_name, source_path))
+}
+
+/// 解決済みのパスの `.luard` を、読めた分まで読む。
+pub fn load_definition_file_lossy(
+    module_name: &str,
+    definition_path: &Path,
+) -> (Option<ModuleDefinition>, Vec<ModuleError>) {
     let source = match fs::read(&definition_path) {
         Ok(bytes) => match String::from_utf8(bytes) {
             Ok(source) => source,
@@ -127,7 +180,7 @@ pub fn load_definition_lossy(
             );
         }
     };
-    let (definition, errors) = parse_definition_lossy(module_name, &definition_path, &source);
+    let (definition, errors) = parse_definition_lossy(module_name, definition_path, &source);
     (Some(definition), errors)
 }
 

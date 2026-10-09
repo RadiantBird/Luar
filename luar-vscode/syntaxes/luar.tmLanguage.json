@@ -91,11 +91,12 @@
     },
     "import-decl": {
       "comment": "type-only module import",
-      "match": "\\b(import)\\b[ \\t]+(type)\\b[ \\t]+([A-Za-z_][A-Za-z0-9_]*)",
+      "match": "\\b(import)\\b[ \\t]+(type)\\b[ \\t]+([A-Za-z_][A-Za-z0-9_]*)(?:[ \\t]+(from)\\b)?",
       "captures": {
         "1": { "name": "keyword.control.import.luar" },
         "2": { "name": "storage.modifier.type.luar" },
-        "3": { "name": "entity.name.namespace.luar" }
+        "3": { "name": "entity.name.namespace.luar" },
+        "4": { "name": "keyword.control.import.luar" }
       }
     },
     "declare-decl": {

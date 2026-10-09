@@ -1,0 +1,25 @@
+class table2 is
+    public is
+        static function add(T: {number}, num: number)
+            for i, v in ipairs(T) do
+                T[i] = v + num
+            end
+        end
+
+        static function sub(T: {number}, num: number)
+            for i, v in ipairs(T) do
+                T[i] = v - num
+            end
+        end
+
+        static function print(T: {any})
+            print('{')
+            for i, v in ipairs(T) do
+                print(`  [{i}] = {v}`)
+            end
+            print('}')
+        end
+    end
+end
+
+return table2

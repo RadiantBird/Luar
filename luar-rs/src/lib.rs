@@ -331,9 +331,9 @@ fn prepare_analysis(source: &str, options: &CompileOptions) -> Result<Prepared, 
     let mut seen_imports = std::collections::HashSet::new();
     let mut errors: Vec<Diagnostic> = Vec::new();
     for stmt in &program.stmts {
-        if let ast::Stmt::ImportDecl { module_name } = stmt {
+        if let ast::Stmt::ImportDecl { module_name, path } = stmt {
             if seen_imports.insert(module_name.clone()) {
-                imports.push(module_name.clone());
+                imports.push((module_name.clone(), path.clone()));
             } else {
                 errors.push(diagnostic(
                     &file,
@@ -365,10 +365,21 @@ fn prepare_analysis(source: &str, options: &CompileOptions) -> Result<Prepared, 
             return Err(errors);
         }
         let include_bindings = include::include_binding_names(source);
-        for module_name in imports {
-            if include_bindings.contains(&module_name)
-                && !modules::definition_path(&module_name, source_path).exists()
-            {
+        for (module_name, import_path) in imports {
+            let line = import_line(source, &module_name);
+            let definition_path = match modules::resolve_definition_path(
+                &module_name,
+                import_path.as_deref(),
+                source_path,
+            ) {
+                Ok(path) => path,
+                Err(message) => {
+                    imports_incomplete = true;
+                    errors.push(diagnostic(&file, line, message));
+                    continue;
+                }
+            };
+            if include_bindings.contains(&module_name) && !definition_path.exists() {
                 // `!include` したソースが見えているので、`.luard` なしで済ませる。
                 let members = checker::Checker::new().module_members(&program, &module_name);
                 definitions.push(modules::ModuleDefinition {
@@ -379,13 +390,13 @@ fn prepare_analysis(source: &str, options: &CompileOptions) -> Result<Prepared, 
                 continue;
             }
             // 読めた宣言は使い、エラーは `import type` の行に報告する(場所は文言に含まれる)。
-            let (definition, load_errors) = modules::load_definition_lossy(&module_name, source_path);
-            let import_line = import_line(source, &module_name);
+            let (definition, load_errors) =
+                modules::load_definition_file_lossy(&module_name, &definition_path);
             imports_incomplete |= !load_errors.is_empty();
             errors.extend(
                 load_errors
                     .into_iter()
-                    .map(|error| diagnostic(&file, import_line, error.message)),
+                    .map(|error| diagnostic(&file, line, error.message)),
             );
             definitions.extend(definition);
         }
@@ -402,6 +413,66 @@ fn prepare_analysis(source: &str, options: &CompileOptions) -> Result<Prepared, 
 }
 
 /// `import type name` の行番号(1始まり)。見つからなければ1。
+/// ソース中の `import type` 1つ分。位置は名前のもの(0始まり)。
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportInfo {
+    pub name: String,
+    pub line: usize,
+    pub column: usize,
+    /// 解決した `.luard` のパス。パスの指定が不正なら `None`。
+    pub path: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportReport {
+    pub imports: Vec<ImportInfo>,
+}
+
+/// ソース中の `import type` を、解決した `.luard` のパスつきで返す。エディタが
+/// パス規則を持たずに済むよう、解決はコンパイラが行う。
+pub fn list_imports(source: &str, options: &CompileOptions) -> Vec<ImportInfo> {
+    let Some(source_path) = options.source_path.as_deref() else {
+        return Vec::new();
+    };
+    let Ok(tokens) = lexer::Lexer::new(source).tokenize() else {
+        return Vec::new();
+    };
+    let mut imports = Vec::new();
+    for index in 0..tokens.len().saturating_sub(2) {
+        use lexer::TokenKind;
+        if tokens[index].kind != TokenKind::Import
+            || tokens[index + 1].kind != TokenKind::Ident
+            || tokens[index + 1].value != "type"
+            || tokens[index + 2].kind != TokenKind::Ident
+        {
+            continue;
+        }
+        let name = &tokens[index + 2];
+        let import_path = (tokens.get(index + 3).is_some_and(|token| {
+            token.kind == TokenKind::Ident && token.value == "from"
+        }))
+        .then(|| tokens.get(index + 4))
+        .flatten()
+        .filter(|token| token.kind == TokenKind::LuaString)
+        .map(|token| token.value.clone());
+        let (path, error) =
+            match modules::resolve_definition_path(&name.value, import_path.as_deref(), source_path)
+            {
+                Ok(path) => (Some(path.display().to_string()), None),
+                Err(message) => (None, Some(message)),
+            };
+        imports.push(ImportInfo {
+            name: name.value.clone(),
+            line: name.line - 1,
+            column: name.column - 1,
+            path,
+            error,
+        });
+    }
+    imports
+}
+
 fn import_line(source: &str, name: &str) -> usize {
     source
         .lines()

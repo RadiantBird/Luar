@@ -228,7 +228,18 @@ impl Parser {
         }
         self.advance(); // contextual `type`
         let module_name = self.eat_ident()?;
-        Ok(Stmt::ImportDecl { module_name })
+        let path = if self.is_contextual("from") {
+            self.advance(); // contextual `from`
+            if !matches!(self.peek_kind(), TokenKind::LuaString) {
+                return Err(self.error(format!(
+                    "[{import_line}] expected a path string after 'from'; use `import type {module_name} from \"./{module_name}.luard\"`"
+                )));
+            }
+            Some(self.advance().value.clone())
+        } else {
+            None
+        };
+        Ok(Stmt::ImportDecl { module_name, path })
     }
 
     fn parse_declare(&mut self, type_params: Vec<String>) -> Result<Stmt, ParseError> {

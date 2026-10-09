@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { indexDocument, normalizeIncludeMacros, parseModuleDefinition } from "../../luar-vscode/src/language";
+import { importsInDocument, indexDocument, normalizeIncludeMacros, parseModuleDefinition } from "../../luar-vscode/src/language";
 
 describe("VS Code module definitions", () => {
   it("goto labelをアウトラインと補完へ載せる", () => {
@@ -143,6 +143,13 @@ describe("VS Code module definitions", () => {
     const result = parseModuleDefinition("RCBN", source);
 
     expect(result.errors).toEqual([]);
+  });
+
+  it("finds import type names with and without a from path", () => {
+    const imports = importsInDocument('import type a\nimport type b from "../defs/b.luard"\nlocal x = 1\n');
+
+    expect(imports.map((item) => item.name)).toEqual(["a", "b"]);
+    expect(imports[1]).toMatchObject({ line: 1, col: 12 });
   });
 
   it("explains that declared classes are already global", () => {

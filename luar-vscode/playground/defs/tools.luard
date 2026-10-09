@@ -1,0 +1,2 @@
+declare global function greet(name: string): string
+declare version: string

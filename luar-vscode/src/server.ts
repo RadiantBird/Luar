@@ -29,6 +29,7 @@ import {
   importsInDocument,
   indexDocument,
   loadModuleDefinition,
+  loadModuleDefinitionFromFile,
   normalizeIncludeMacros,
   type DocumentIndex,
   type LanguageSymbol,
@@ -106,18 +107,18 @@ connection.onInitialized(() => {
   // クライアントが初期化前に開いていた文書は、didOpenの順序や同期実装に
   // 依存せず、ここで必ずインデックスと意味診断を開始する。
   for (const document of documents.all()) {
-    updateIndex(document);
+    void updateIndex(document);
     scheduleValidation(document);
   }
 });
 
 documents.onDidChangeContent(({ document }) => {
-  updateIndex(document);
+  void updateIndex(document);
   scheduleValidation(document);
   if (document.uri.toLowerCase().endsWith(".luard")) refreshOpenImporters();
 });
 documents.onDidOpen(({ document }) => {
-  updateIndex(document);
+  void updateIndex(document);
   scheduleValidation(document);
   if (document.uri.toLowerCase().endsWith(".luard")) refreshOpenImporters();
 });
@@ -224,10 +225,14 @@ connection.onDocumentSymbol((params): DocumentSymbol[] => {
   });
 });
 
-function updateIndex(document: TextDocument): void {
-  const modules = resolveModules(document);
+async function updateIndex(document: TextDocument): Promise<void> {
+  const version = document.version;
+  const modules = await resolveModules(document);
+  // 解決している間に編集された文書は、新しい版の更新に任せる。
+  if (documents.get(document.uri)?.version !== version) return;
   indexes.set(document.uri, indexDocument(normalizeIncludeMacros(document.getText()), modules.definitions));
   moduleDiagnostics.set(document.uri, modules.diagnostics);
+  publishUriDiagnostics(document.uri);
 }
 function getIndex(document: TextDocument): DocumentIndex {
   const current = indexes.get(document.uri);
@@ -240,12 +245,21 @@ function getIndex(document: TextDocument): DocumentIndex {
 function refreshOpenImporters(): void {
   for (const document of documents.all()) {
     if (document.uri.toLowerCase().endsWith(".luard")) continue;
-    updateIndex(document);
+    void updateIndex(document);
     scheduleValidation(document);
   }
 }
 
-function resolveModules(document: TextDocument): { definitions: NonNullable<ReturnType<typeof loadModuleDefinition>["definition"]>[]; diagnostics: Diagnostic[] } {
+/** コンパイラが解決した `import type`(`luar imports`)。 */
+interface CompilerImport {
+  name: string;
+  line: number;
+  column: number;
+  path: string | null;
+  error: string | null;
+}
+
+async function resolveModules(document: TextDocument): Promise<{ definitions: NonNullable<ReturnType<typeof loadModuleDefinition>["definition"]>[]; diagnostics: Diagnostic[] }> {
   const definitions: NonNullable<ReturnType<typeof loadModuleDefinition>["definition"]>[] = [];
   const diagnostics: Diagnostic[] = [];
   const imports = importsInDocument(document.getText());
@@ -256,6 +270,11 @@ function resolveModules(document: TextDocument): { definitions: NonNullable<Retu
   } catch {
     return { definitions, diagnostics };
   }
+  // `.luard` の場所(`import type name from "../defs/x.luard"` の相対パスなど)はコンパイラが解決する。
+  // コンパイラを呼べないときは、同じディレクトリの `name.luard` だけを探す。
+  const report = imports.length > 0
+    ? await queryCompiler<{ imports?: CompilerImport[] }>(document, "imports")
+    : null;
 
   for (const imported of imports) {
     if (seen.has(imported.name)) {
@@ -268,7 +287,12 @@ function resolveModules(document: TextDocument): { definitions: NonNullable<Retu
       continue;
     }
     seen.add(imported.name);
-    const result = loadModuleDefinition(imported.name, sourcePath);
+    const resolved = report?.imports?.find((candidate) => candidate.name === imported.name && candidate.line === imported.line);
+    const result = resolved?.error
+      ? { definition: null, errors: [{ message: resolved.error, line: -1, col: -1 }] }
+      : resolved?.path
+        ? loadModuleDefinitionFromFile(imported.name, resolved.path)
+        : loadModuleDefinition(imported.name, sourcePath);
     if (result.definition) definitions.push(result.definition);
     if (result.errors.length === 0) continue;
     for (const error of result.errors) {

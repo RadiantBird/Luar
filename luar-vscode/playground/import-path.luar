@@ -1,0 +1,4 @@
+import type tools from "./defs/tools.luard"
+
+local v: string = tools.version
+print(v)

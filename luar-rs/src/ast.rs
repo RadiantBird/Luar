@@ -244,6 +244,8 @@ pub enum Stmt {
     ClassDecl(ClassDecl),
     ImportDecl {
         module_name: String,
+        /// `import type name from "path"` の `path`。なければ同じディレクトリの `name.luard`。
+        path: Option<String>,
     },
     DeclareStmt {
         is_global: bool,
